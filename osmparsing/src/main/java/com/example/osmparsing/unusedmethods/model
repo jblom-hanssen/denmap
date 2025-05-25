@@ -1,0 +1,166 @@
+    public int getAddressCount() {
+        return addressHandler.size();
+    }
+
+    // Add this method to the Model class
+    public void analyzeGraphConnectivity() {
+        if (roadGraph == null) {
+            System.out.println("Building road graph for analysis...");
+            buildRoadGraph();
+        }
+
+        // Use BFS to find connected components
+        boolean[] visited = new boolean[roadGraph.V()];
+        List<Integer> componentSizes = new ArrayList<>();
+
+        for (int v = 0; v < roadGraph.V(); v++) {
+            if (!visited[v]) {
+                // Start a new component
+                int size = 0;
+                Queue<Integer> queue = new LinkedList<>();
+
+                queue.add(v);
+                visited[v] = true;
+
+                while (!queue.isEmpty()) {
+                    int current = queue.poll();
+                    size++;
+
+                    for (DirectedEdge e : roadGraph.adj(current)) {
+                        int w = e.to();
+                        if (!visited[w]) {
+                            visited[w] = true;
+                            queue.add(w);
+                        }
+                    }
+                }
+
+                componentSizes.add(size);
+            }
+        }
+
+        // Sort components by size (largest first)
+        componentSizes.sort(Collections.reverseOrder());
+
+        System.out.println("Graph connectivity analysis:");
+        System.out.println("  - Total vertices: " + roadGraph.V());
+        System.out.println("  - Total edges: " + roadGraph.E());
+        System.out.println("  - Connected components: " + componentSizes.size());
+
+        for (int i = 0; i < Math.min(5, componentSizes.size()); i++) {
+            System.out.println("  - Component " + (i+1) + " size: " + componentSizes.get(i) +
+                    " vertices (" + (100.0 * componentSizes.get(i) / roadGraph.V()) + "%)");
+        }
+    }
+    public boolean testConnectivity(int startVertex, int endVertex) {
+        if (roadGraph == null) return false;
+
+        // Use BFS to see if endVertex is reachable from startVertex
+        boolean[] visited = new boolean[roadGraph.V()];
+        Queue<Integer> queue = new LinkedList<>();
+        visited[startVertex] = true;
+        queue.add(startVertex);
+
+        while (!queue.isEmpty()) {
+            int v = queue.poll();
+
+            if (v == endVertex) return true;
+
+            for (DirectedEdge e : roadGraph.adj(v)) {
+                int w = e.to();
+                if (!visited[w]) {
+                    visited[w] = true;
+                    queue.add(w);
+                }
+            }
+        }
+
+        return false;
+    }
+
+    public void addDirectConnection(int v1, int v2) {
+        if (roadGraph == null) return;
+
+        GraphBuilder builder = getGraphBuilder();
+        double[] coords1 = builder.getCoordinatesForVertex(v1);
+        double[] coords2 = builder.getCoordinatesForVertex(v2);
+
+        if (coords1 != null && coords2 != null) {
+            double distance = Math.sqrt(
+                    Math.pow(coords1[0] - coords2[0], 2) +
+                            Math.pow(coords1[1] - coords2[1], 2)
+            );
+
+            roadGraph.addEdge(new DirectedEdge(v1, v2, distance));
+            roadGraph.addEdge(new DirectedEdge(v2, v1, distance));
+
+            System.out.println("Added direct connection between vertices " + v1 + " and " + v2);
+        }
+    }
+     public void cleanup() {
+            if (graphBuilder != null) {
+                graphBuilder.cleanup();
+            }
+        }
+        public float[] getNodeCoordinates(long nodeId) {
+
+                Node node = id2node.get(nodeId);
+                if (node != null) {
+                    return new float[]{node.lon, node.lat};
+                }
+                return null;
+            }
+
+public EdgeWeightedDigraph buildRoadGraph() {
+        if (roadGraph != null) {
+            return roadGraph; // Return cached graph if already built
+        }
+
+        System.out.println("Building road graph post-parsing...");
+        long startTime = System.currentTimeMillis();
+
+        // Create a graph builder
+        if (graphBuilder == null) {
+            graphBuilder = new GraphBuilder(this);
+        }
+
+        // For post-parsing graph building, we need a different approach
+        // since we don't have a simple "ways" list anymore
+        roadGraph = graphBuilder.initializeGraph(10000000); // Start with a large capacity
+
+        // Process each road type that would typically be part of the routing graph
+        String[] roadTypes = {"motorway", "trunk", "primary", "secondary",
+                "tertiary", "unclassifiedhighway", "residential",
+                "service", "track", "path", "cycleway"};
+
+        int wayCount = 0;
+        for (String roadType : roadTypes) {
+            ArrayList<Way> roads = typeWays.get(roadType);
+            if (roads != null) {
+                System.out.println("Processing " + roads.size() + " " + roadType + " roads");
+
+                for (Way way : roads) {
+                    // Determine if road is one-way based on type or properties
+                    boolean isOneWay = roadType.equals("motorway") ||
+                            (way.data != null && way.data.contains("oneway=yes"));
+
+                    graphBuilder.addRoadToGraph(way, roadType, isOneWay);
+                    wayCount++;
+
+                    // Log progress periodically
+                    if (wayCount % 50000 == 0) {
+                        System.out.println("Processed " + wayCount + " roads for graph building");
+                    }
+                }
+            }
+        }
+
+        // Finalize the graph
+        roadGraph = graphBuilder.finalizeGraph();
+
+        long endTime = System.currentTimeMillis();
+        System.out.println("Road graph built in " + (endTime - startTime) + "ms with " +
+                graphBuilder.getVertexCount() + " vertices");
+
+        return roadGraph;
+    }

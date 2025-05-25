@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ProjectModuleManager">
+    <modules>
+      <module fileurl="file://$PROJECT_DIR$/.idea/BFST2025Group27.iml" filepath="$PROJECT_DIR$/.idea/BFST2025Group27.iml" />
+      <module fileurl="file://$PROJECT_DIR$/osmparsing/libs/libs.iml" filepath="$PROJECT_DIR$/osmparsing/libs/libs.iml" />
+    </modules>
+  </component>
+</project>
