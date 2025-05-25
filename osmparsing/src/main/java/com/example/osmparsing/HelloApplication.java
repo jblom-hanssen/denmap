@@ -33,7 +33,7 @@ public class HelloApplication extends Application {
         var model = Model.load(filename);
         System.out.println("ADRESSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS");
         System.out.println("adresshandler size " + model.addressHandlerSize());
-        model.printid2NodeSortCount();
+        // model.printid2NodeSortCount();
         var view = new View(model, stage);
         new Controller(model, view);
     }

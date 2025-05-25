@@ -1,8 +1,7 @@
 package com.example.osmparsing.address;
 
 import java.io.Serializable;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.*;
 
 /**
  * Class to manage address data using a TrieST for efficient lookups.
@@ -91,5 +90,16 @@ public class AddressHandler implements Serializable {
 
     public boolean isEmpty() {
         return addressTrie.isEmpty();
+    }
+    public Collection<OSMAddress> getAllAddresses() {
+        List<OSMAddress> allAddresses = new ArrayList<>();
+        // Collect all addresses from the trie
+        for (String key : addressTrie.keys()) {
+            OSMAddress address = addressTrie.get(key);
+            if (address != null) {
+                allAddresses.add(address);
+            }
+        }
+        return allAddresses;
     }
 }

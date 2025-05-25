@@ -20,7 +20,7 @@ public class GraphBuilder implements Serializable {
     private EdgeWeightedDigraph graph;
     private int vertexCount = 0;
     private Model model;
-
+    private Map<Integer, Long> vertexToNodeId = new HashMap<>();
     // Track node usage and road data for two-pass approach
     private Map<Long, Integer> nodeUsageCount = new HashMap<>();
     private List<RoadData> roadDataList = new ArrayList<>();
@@ -141,128 +141,102 @@ public class GraphBuilder implements Serializable {
         long analysisStart = System.currentTimeMillis();
 
         System.out.println("Analyzing " + roadDataList.size() + " roads...");
-        int roadsProcessed = 0;
 
-        // First, create vertices for all intersections and endpoints
-        Set<Long> processedEndpoints = new HashSet<>();
+        // First, cache all coordinates
+        for (RoadData road : roadDataList) {
+            if (road.way != null) {
+                float[] coords = road.way.getCoords();
+                for (int i = 0; i < road.nodeIds.size() && i * 2 + 1 < coords.length; i++) {
+                    nodeCoordinateCache.put(road.nodeIds.get(i),
+                            new float[]{coords[i * 2], coords[i * 2 + 1]});
+                }
+            }
+        }
 
+        // Analyze node connections to find TRUE intersections
+        Map<Long, Set<String>> nodeRoadTypes = new HashMap<>();
+
+        for (RoadData road : roadDataList) {
+            // For each node in the road, track what road types use it
+            for (Long nodeId : road.nodeIds) {
+                nodeRoadTypes.computeIfAbsent(nodeId, k -> new HashSet<>())
+                        .add(road.roadType);
+            }
+        }
+
+        // Create vertices only for:
+        // 1. Nodes used by 3+ ways (definite intersection)
+        // 2. Nodes where different road types meet
+        // 3. Endpoints
+
+        Set<Long> realIntersections = new HashSet<>();
+        Set<Long> endpoints = new HashSet<>();
+
+        for (Map.Entry<Long, Integer> entry : nodeUsageCount.entrySet()) {
+            Long nodeId = entry.getKey();
+            int usage = entry.getValue();
+
+            if (usage >= 3) {
+                // 3+ ways meet here - definitely an intersection
+                realIntersections.add(nodeId);
+            } else if (usage == 2) {
+                // Check if different road types meet
+                Set<String> roadTypes = nodeRoadTypes.get(nodeId);
+                if (roadTypes != null && roadTypes.size() > 1) {
+                    // Different road types - likely an intersection
+                    realIntersections.add(nodeId);
+                }
+                // Otherwise, it's probably just a continuation point
+            }
+        }
+
+        System.out.println("Found " + realIntersections.size() + " real intersections");
+
+        // Create vertices for intersections
+        for (Long nodeId : realIntersections) {
+            float[] coords = nodeCoordinateCache.get(nodeId);
+            if (coords != null) {
+                createVertex(nodeId, coords[0], coords[1]);
+            }
+        }
+
+        // Create vertices for endpoints
         for (RoadData road : roadDataList) {
             if (road.nodeIds.isEmpty()) continue;
 
-            roadsProcessed++;
-            if (roadsProcessed % 100000 == 0) {
-                System.out.println("  Processed " + roadsProcessed + "/" + roadDataList.size() +
-                        " roads (" + (roadsProcessed * 100 / roadDataList.size()) + "%)");
-            }
-
-            // Cache coordinates for all nodes in this road
-            float[] coords = road.way.getCoords();
-            for (int i = 0; i < road.nodeIds.size() && i * 2 + 1 < coords.length; i++) {
-                nodeCoordinateCache.putIfAbsent(road.nodeIds.get(i),
-                        new float[]{coords[i * 2], coords[i * 2 + 1]});
-            }
-
-            // Always create vertices for endpoints
             long firstNodeId = road.nodeIds.get(0);
             long lastNodeId = road.nodeIds.get(road.nodeIds.size() - 1);
 
-            if (!processedEndpoints.contains(firstNodeId)) {
-                createVertexForNode(firstNodeId, road.way, 0);
-                processedEndpoints.add(firstNodeId);
-                if (nodeUsageCount.get(firstNodeId) == 1) {
-                    deadEndCount++;
+            // Add endpoint if not already a vertex
+            if (!nodeToVertex.containsKey(firstNodeId)) {
+                float[] coords = nodeCoordinateCache.get(firstNodeId);
+                if (coords != null) {
+                    createVertex(firstNodeId, coords[0], coords[1]);
+                    endpoints.add(firstNodeId);
                 }
             }
 
-            if (!processedEndpoints.contains(lastNodeId)) {
-                createVertexForNode(lastNodeId, road.way, road.nodeIds.size() - 1);
-                processedEndpoints.add(lastNodeId);
-                if (nodeUsageCount.get(lastNodeId) == 1) {
-                    deadEndCount++;
-                }
-            }
-        }
-
-        System.out.println("Creating vertices for intersections...");
-        int intersectionsProcessed = 0;
-
-        // Create vertices for all intersection nodes (usage > 1)
-        Set<Long> intersectionNodes = new HashSet<>();
-        for (Map.Entry<Long, Integer> entry : nodeUsageCount.entrySet()) {
-            if (entry.getValue() > 1) {
-                intersectionNodes.add(entry.getKey());
-                if (!nodeToVertex.containsKey(entry.getKey())) {
-                    // Use cached coordinates
-                    float[] coords = nodeCoordinateCache.get(entry.getKey());
-                    if (coords != null) {
-                        createVertex(entry.getKey(), coords[0], coords[1]);
-                        intersectionCount++;
-                        intersectionsProcessed++;
-
-                        if (intersectionsProcessed % 10000 == 0) {
-                            System.out.println("  Created " + intersectionsProcessed + " intersection vertices");
-                        }
-                    }
+            if (!nodeToVertex.containsKey(lastNodeId)) {
+                float[] coords = nodeCoordinateCache.get(lastNodeId);
+                if (coords != null) {
+                    createVertex(lastNodeId, coords[0], coords[1]);
+                    endpoints.add(lastNodeId);
                 }
             }
         }
 
-        System.out.println("Adding intermediate vertices for long segments...");
-        roadsProcessed = 0;
+        intersectionCount = realIntersections.size();
+        deadEndCount = endpoints.size();
 
-        // Add intermediate vertices for long segments between intersections
-        for (RoadData road : roadDataList) {
-            roadsProcessed++;
-            if (roadsProcessed % 100000 == 0) {
-                System.out.println("  Processing intermediate vertices: " +
-                        roadsProcessed + "/" + roadDataList.size());
-            }
-            addIntermediateVertices(road, intersectionNodes);
-        }
-
-        long analysisEnd = System.currentTimeMillis();
-        System.out.println("Intersection analysis completed in " + (analysisEnd - analysisStart) + "ms");
-        System.out.println("Found " + intersectionCount + " intersections, " +
-                deadEndCount + " dead ends, " + connectorCount + " connectors");
-        System.out.println("Created " + vertexCount + " vertices");
+        System.out.println("Created " + vertexCount + " vertices total");
+        System.out.println("(" + intersectionCount + " intersections + " + deadEndCount + " endpoints)");
     }
 
     /**
      * Add intermediate vertices for long segments
      */
     private void addIntermediateVertices(RoadData road, Set<Long> intersectionNodes) {
-        List<Integer> segmentVertices = new ArrayList<>();
-        float[] coords = road.way.getCoords();
-
-        // Track which nodes in this way are vertices
-        for (int i = 0; i < road.nodeIds.size(); i++) {
-            long nodeId = road.nodeIds.get(i);
-            if (nodeToVertex.containsKey(nodeId)) {
-                segmentVertices.add(i);
-            }
-        }
-
-        // Add intermediate vertices for long segments
-        for (int i = 0; i < segmentVertices.size() - 1; i++) {
-            int start = segmentVertices.get(i);
-            int end = segmentVertices.get(i + 1);
-            int segmentLength = end - start;
-
-            // Add intermediate vertices based on road type and segment length
-            int stepSize = isMajorRoad(road.roadType) ? 10 : 20;
-
-            if (segmentLength > stepSize) {
-                for (int j = start + stepSize; j < end; j += stepSize) {
-                    if (j < road.nodeIds.size() && j * 2 + 1 < coords.length) {
-                        long nodeId = road.nodeIds.get(j);
-                        if (!nodeToVertex.containsKey(nodeId)) {
-                            createVertex(nodeId, coords[j * 2], coords[j * 2 + 1]);
-                            connectorCount++;
-                        }
-                    }
-                }
-            }
-        }
+        return;
     }
 
     /**
@@ -394,7 +368,11 @@ public class GraphBuilder implements Serializable {
 
         int vertex = vertexCount++;
         nodeToVertex.put(nodeId, vertex);
+        vertexToNodeId.put(vertex, nodeId);  // Add reverse mapping
         vertexCoords.put(vertex, new float[]{x, y});
+    }
+    public Long getNodeIdForVertex(int vertex) {
+        return vertexToNodeId.get(vertex);
     }
 
     /**
