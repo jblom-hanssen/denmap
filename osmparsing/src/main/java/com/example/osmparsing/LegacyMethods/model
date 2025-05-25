@@ -1,0 +1,293 @@
+    public int getAddressCount() {
+        return addressHandler.size();
+    }
+
+    // Add this method to the Model class
+    public void analyzeGraphConnectivity() {
+        if (roadGraph == null) {
+            System.out.println("Building road graph for analysis...");
+            buildRoadGraph();
+        }
+
+        // Use BFS to find connected components
+        boolean[] visited = new boolean[roadGraph.V()];
+        List<Integer> componentSizes = new ArrayList<>();
+
+        for (int v = 0; v < roadGraph.V(); v++) {
+            if (!visited[v]) {
+                // Start a new component
+                int size = 0;
+                Queue<Integer> queue = new LinkedList<>();
+
+                queue.add(v);
+                visited[v] = true;
+
+                while (!queue.isEmpty()) {
+                    int current = queue.poll();
+                    size++;
+
+                    for (DirectedEdge e : roadGraph.adj(current)) {
+                        int w = e.to();
+                        if (!visited[w]) {
+                            visited[w] = true;
+                            queue.add(w);
+                        }
+                    }
+                }
+
+                componentSizes.add(size);
+            }
+        }
+
+        // Sort components by size (largest first)
+        componentSizes.sort(Collections.reverseOrder());
+
+        System.out.println("Graph connectivity analysis:");
+        System.out.println("  - Total vertices: " + roadGraph.V());
+        System.out.println("  - Total edges: " + roadGraph.E());
+        System.out.println("  - Connected components: " + componentSizes.size());
+
+        for (int i = 0; i < Math.min(5, componentSizes.size()); i++) {
+            System.out.println("  - Component " + (i+1) + " size: " + componentSizes.get(i) +
+                    " vertices (" + (100.0 * componentSizes.get(i) / roadGraph.V()) + "%)");
+        }
+    }
+    public boolean testConnectivity(int startVertex, int endVertex) {
+        if (roadGraph == null) return false;
+
+        // Use BFS to see if endVertex is reachable from startVertex
+        boolean[] visited = new boolean[roadGraph.V()];
+        Queue<Integer> queue = new LinkedList<>();
+        visited[startVertex] = true;
+        queue.add(startVertex);
+
+        while (!queue.isEmpty()) {
+            int v = queue.poll();
+
+            if (v == endVertex) return true;
+
+            for (DirectedEdge e : roadGraph.adj(v)) {
+                int w = e.to();
+                if (!visited[w]) {
+                    visited[w] = true;
+                    queue.add(w);
+                }
+            }
+        }
+
+        return false;
+    }
+
+    public void addDirectConnection(int v1, int v2) {
+        if (roadGraph == null) return;
+
+        GraphBuilder builder = getGraphBuilder();
+        double[] coords1 = builder.getCoordinatesForVertex(v1);
+        double[] coords2 = builder.getCoordinatesForVertex(v2);
+
+        if (coords1 != null && coords2 != null) {
+            double distance = Math.sqrt(
+                    Math.pow(coords1[0] - coords2[0], 2) +
+                            Math.pow(coords1[1] - coords2[1], 2)
+            );
+
+            roadGraph.addEdge(new DirectedEdge(v1, v2, distance));
+            roadGraph.addEdge(new DirectedEdge(v2, v1, distance));
+
+            System.out.println("Added direct connection between vertices " + v1 + " and " + v2);
+        }
+    }
+     public void cleanup() {
+            if (graphBuilder != null) {
+                graphBuilder.cleanup();
+            }
+        }
+        public float[] getNodeCoordinates(long nodeId) {
+
+                Node node = id2node.get(nodeId);
+                if (node != null) {
+                    return new float[]{node.lon, node.lat};
+                }
+                return null;
+            }
+
+public EdgeWeightedDigraph buildRoadGraph() {
+        if (roadGraph != null) {
+            return roadGraph; // Return cached graph if already built
+        }
+
+        System.out.println("Building road graph post-parsing...");
+        long startTime = System.currentTimeMillis();
+
+        // Create a graph builder
+        if (graphBuilder == null) {
+            graphBuilder = new GraphBuilder(this);
+        }
+
+        // For post-parsing graph building, we need a different approach
+        // since we don't have a simple "ways" list anymore
+        roadGraph = graphBuilder.initializeGraph(10000000); // Start with a large capacity
+
+        // Process each road type that would typically be part of the routing graph
+        String[] roadTypes = {"motorway", "trunk", "primary", "secondary",
+                "tertiary", "unclassifiedhighway", "residential",
+                "service", "track", "path", "cycleway"};
+
+        int wayCount = 0;
+        for (String roadType : roadTypes) {
+            ArrayList<Way> roads = typeWays.get(roadType);
+            if (roads != null) {
+                System.out.println("Processing " + roads.size() + " " + roadType + " roads");
+
+                for (Way way : roads) {
+                    // Determine if road is one-way based on type or properties
+                    boolean isOneWay = roadType.equals("motorway") ||
+                            (way.data != null && way.data.contains("oneway=yes"));
+
+                    graphBuilder.addRoadToGraph(way, roadType, isOneWay);
+                    wayCount++;
+
+                    // Log progress periodically
+                    if (wayCount % 50000 == 0) {
+                        System.out.println("Processed " + wayCount + " roads for graph building");
+                    }
+                }
+            }
+        }
+
+        // Finalize the graph
+        roadGraph = graphBuilder.finalizeGraph();
+
+        long endTime = System.currentTimeMillis();
+        System.out.println("Road graph built in " + (endTime - startTime) + "ms with " +
+                graphBuilder.getVertexCount() + " vertices");
+
+        return roadGraph;
+    }
+public void quickPerformanceDiagnostic() {
+        System.out.println("\n=== QUICK PERFORMANCE DIAGNOSTIC ===");
+
+        // 1. What percentage were highways that got skipped?
+        int totalHighways = roadWaysProcessed +
+                (unknownHighwayTypes != null ? unknownHighwayTypes.values().stream().mapToInt(Integer::intValue).sum() : 0);
+        int skippedHighways = unknownHighwayTypes != null ?
+                unknownHighwayTypes.values().stream().mapToInt(Integer::intValue).sum() : 0;
+
+        System.out.println("\n1. HIGHWAY SKIPPING IMPACT:");
+        System.out.println("Total highway ways: " + totalHighways);
+        System.out.println("Skipped highways: " + skippedHighways);
+        System.out.println("Percentage skipped: " + (totalHighways > 0 ? 100.0 * skippedHighways / totalHighways : 0) + "%");
+
+        if (skippedHighways < totalHighways * 0.05) {
+            System.out.println("❌ Less than 5% skipped - explains why no performance gain!");
+        }
+
+        // 2. What's actually taking up memory/rendering time?
+        System.out.println("\n2. BIGGEST DATA CONSUMERS:");
+
+        Map<String, Integer> typeCounts = new HashMap<>();
+
+        for (Map.Entry<String, ArrayList<Way>> entry : typeWays.entrySet()) {
+            int count = entry.getValue().size();
+            typeCounts.put(entry.getKey(), count);
+        }
+
+        // FIX: Calculate totalWays as final
+        final int totalWays = typeCounts.values().stream()
+                .mapToInt(Integer::intValue)
+                .sum();
+
+        // Now totalWays is effectively final and can be used in lambda
+        typeCounts.entrySet().stream()
+                .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
+                .limit(5)
+                .forEach(e -> System.out.printf("  %s: %,d ways (%.1f%%)\n",
+                        e.getKey(), e.getValue(), 100.0 * e.getValue() / totalWays));
+
+        // 3. The REAL performance killers
+        System.out.println("\n3. LIKELY PERFORMANCE BOTTLENECKS:");
+
+        int buildings = typeCounts.getOrDefault("building", 0);
+        if (buildings > 50000) {
+            System.out.println("🔴 BUILDINGS: " + buildings + " - Major impact on rendering!");
+            System.out.println("   Fix: Skip buildings when zoomed out");
+        }
+
+        int naturalFeatures =
+                typeCounts.getOrDefault("forest", 0) +
+                        typeCounts.getOrDefault("grass", 0) +
+                        typeCounts.getOrDefault("farmland", 0) +
+                        typeCounts.getOrDefault("water", 0);
+
+        if (naturalFeatures > 30000) {
+            System.out.println("🔴 NATURAL FEATURES: " + naturalFeatures + " - Complex polygons slow rendering!");
+            System.out.println("   Fix: Simplify geometries for low zoom levels");
+        }
+
+        int minorRoads =
+                typeCounts.getOrDefault("serviceroad", 0) +
+                        typeCounts.getOrDefault("path", 0) +
+                        typeCounts.getOrDefault("track", 0) +
+                        typeCounts.getOrDefault("footway", 0);
+
+        if (minorRoads > 50000) {
+            System.out.println("🔴 MINOR ROADS/PATHS: " + minorRoads + " - Too many for overview!");
+            System.out.println("   Fix: Hide these at low zoom levels");
+        }
+
+        // 4. Quick fixes that will actually help
+        System.out.println("\n4. RECOMMENDED OPTIMIZATIONS:");
+        System.out.println("Based on your data, try these in order:");
+
+        List<String> recommendations = new ArrayList<>();
+
+        if (buildings > 50000) {
+            recommendations.add("1. Skip buildings: if (k.equals(\"building\") && zoomLevel < 15) { skipCurrentWay = true; }");
+        }
+
+        if (naturalFeatures > 30000) {
+            recommendations.add("2. Simplify large polygons: Reduce points in forests/water when zoomed out");
+        }
+
+        if (minorRoads > 50000) {
+            recommendations.add("3. Filter minor roads: Skip service roads, paths, tracks at low zoom");
+        }
+
+        recommendations.add("4. Implement viewport culling: Only process ways visible on screen");
+        recommendations.add("5. Add LOD system: Different detail levels for different zoom levels");
+
+        recommendations.forEach(System.out::println);
+    }
+private int findNearestConnectedVertex(float x, float y) {
+        if (graphBuilder == null) return -1;
+
+        EdgeWeightedDigraph graph = getRoadGraph();
+        float minDistance = Float.MAX_VALUE;
+        int bestVertex = -1;
+
+        // Only check a subset of vertices for performance
+        int maxVerticesToCheck = Math.min(5000, graphBuilder.getVertexCount());
+        int step = Math.max(1, graphBuilder.getVertexCount() / maxVerticesToCheck);
+
+        for (int v = 0; v < graphBuilder.getVertexCount(); v += step) {
+            // Skip unconnected vertices
+            if (graph.outdegree(v) == 0 && graph.indegree(v) == 0) continue;
+
+            float[] coords = graphBuilder.getCoordinatesForVertex(v);
+            if (coords != null) {
+                float dist = calculateDistance(x, y, coords[0], coords[1]);
+                if (dist < minDistance) {
+                    minDistance = dist;
+                    bestVertex = v;
+                }
+            }
+        }
+
+        System.out.println("Found connected vertex " + bestVertex + " at distance " + minDistance);
+        return bestVertex;
+    }
+private float calculateDistance(float x1, float y1, float x2, float y2) {
+        float dx = x2 - x1;
+        float dy = y2 - y1;
+        return FloatMath.sqrt(dx * dx + dy * dy);
+    }

@@ -1,23 +1,20 @@
 package com.example.osmparsing.mvc;
 
-import com.example.osmparsing.algorithms.EdgeWeightedDigraph;
+
 import com.example.osmparsing.algorithms.DirectedEdge;
 import com.example.osmparsing.algorithms.Viewport;
 import com.example.osmparsing.utility.FloatMath;
 import com.example.osmparsing.utility.GraphBuilder;
 import com.example.osmparsing.utility.PointOfInterest;
 import com.example.osmparsing.way.*;
-import javafx.scene.image.Image;
 import javafx.scene.layout.StackPane;
 import javafx.stage.Stage;
-import javafx.geometry.Point2D;
 import javafx.scene.Scene;
 import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
 import javafx.scene.layout.BorderPane;
 import javafx.scene.paint.Color;
 import javafx.scene.transform.Affine;
-import javafx.scene.transform.NonInvertibleTransformException;
 import javafx.scene.layout.HBox;
 
 import java.util.ArrayList;
@@ -29,7 +26,6 @@ public class View {
     float width = 480.0F;
     Canvas canvas = new Canvas(height, width);
     GraphicsContext gc = canvas.getGraphicsContext2D();
-    private boolean showGraph = false;
     private HBox toolbar; // Make toolbar accessible
     private List<DirectedEdge> currentRoute;
     private boolean showRoute = false;
@@ -41,8 +37,6 @@ public class View {
     int minZoom = 0;
     int zoomLevel;
 
-    float x = 0;
-    float y = 0;
     int radius = 300;
     float[] circleCenterLatLon = null;
 
@@ -233,81 +227,6 @@ public class View {
         gc.fillOval(screenX - radiusX, screenY - radiusY, radiusX * 2, radiusY * 2);
     }
 
-    public Point2D mousetoModel(float lastX, float lastY) {
-        try {
-            return trans.inverseTransform(lastX, lastY);
-        } catch (NonInvertibleTransformException e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    public HBox getToolbar() {
-        return toolbar;
-    }
-
-    public void toggleGraphVisibility() {
-        // Build the graph if it doesn't exist yet
-        if (model.getRoadGraph() == null) {
-            System.out.println("Building road network graph...");
-            long startTime = System.currentTimeMillis();
-            model.buildRoadGraph();
-            long endTime = System.currentTimeMillis();
-            System.out.println("Graph built in " + (endTime - startTime) + "ms");
-        }
-
-        // Toggle graph visibility
-        showGraph = !showGraph;
-        System.out.println("Graph visualization: " + (showGraph ? "enabled" : "disabled"));
-        redraw();
-    }
-
-    public boolean isGraphVisible() {
-        return showGraph;
-    }
-
-    private void drawGraph() {
-        GraphBuilder builder = model.getGraphBuilder();
-        EdgeWeightedDigraph graph = model.getRoadGraph();
-
-        // Draw edges
-        gc.setStroke(javafx.scene.paint.Color.LIMEGREEN);
-        gc.setLineWidth(0.8 / Math.sqrt(trans.determinant()));
-
-        // Sample vertices to avoid overdrawing
-        int sampleRate = Math.max(1, builder.getVertexCount() / 1000);
-        int edgeCount = 0;
-
-        for (int v = 0; v < builder.getVertexCount(); v += sampleRate) {
-            float[] fromCoords = builder.getCoordinatesForVertex(v);
-            if (fromCoords != null) {
-                for (DirectedEdge e : graph.adj(v)) {
-                    if (e.to() % sampleRate == 0) { // Only connect sampled vertices
-                        float[] toCoords = builder.getCoordinatesForVertex(e.to());
-                        if (toCoords != null) {
-                            gc.beginPath();
-                            gc.moveTo(fromCoords[0], fromCoords[1]);
-                            gc.lineTo(toCoords[0], toCoords[1]);
-                            gc.stroke();
-
-                            if (++edgeCount > 3000) break; // Limit edges for performance
-                        }
-                    }
-                }
-                if (edgeCount > 3000) break;
-            }
-        }
-
-        // Draw vertices
-        gc.setFill(javafx.scene.paint.Color.RED);
-        float vertexSize = (float) (3.0 / Math.sqrt(trans.determinant()));
-
-        for (int v = 0; v < builder.getVertexCount(); v += sampleRate) {
-            float[] coords = builder.getCoordinatesForVertex(v);
-            if (coords != null) {
-                gc.fillOval(coords[0] - vertexSize / 2, coords[1] - vertexSize / 2, vertexSize, vertexSize);
-            }
-        }
-    }
 
     public void displayRoute(List<DirectedEdge> route) {
         if (route == null || route.isEmpty()) {
@@ -369,45 +288,6 @@ public class View {
                 gc.fillOval(endCoords[0] - markerSize / 2, endCoords[1] - markerSize / 2, markerSize, markerSize);
             }
         }
-    }
-
-    private void resetView() {
-        // Calculate view bounds from the model data
-        float minLon = (float) Double.MAX_VALUE, maxLon = (float) Double.MIN_VALUE;
-        float minLat = (float) Double.MAX_VALUE, maxLat = (float) Double.MIN_VALUE;
-
-
-        System.out.println("Map bounds: Lon[" + minLon + ", " + maxLon + "], Lat[" + minLat + ", " + maxLat + "]");
-
-        // Set up viewport with actual data bounds
-        viewport = new Viewport(minLon, maxLon, minLat, maxLat, (float) canvas.getWidth(), (float) canvas.getHeight());
-
-        // Calculate initial zoom to fit the data
-        float dataWidth = maxLon - minLon;
-        float dataHeight = maxLat - minLat;
-        float viewWidth = (float) canvas.getWidth();
-        float viewHeight = (float) canvas.getHeight();
-
-        // Avoid division by zero
-        if (dataWidth > 0 && dataHeight > 0) {
-            float scaleX = viewWidth / dataWidth;
-            float scaleY = viewHeight / dataHeight;
-            float initialScale = (float) (Math.min(scaleX, scaleY) * 0.9); // 90% to leave margins
-
-            System.out.println("Initial scale: " + initialScale);
-
-            // Set initial zoom level based on scale
-            zoomLevel = (int) Math.round(Math.log(initialScale) / Math.log(1.2));
-            zoomLevel = Math.min(maxZoom, Math.max(minZoom, zoomLevel)); // Clamp to valid range
-
-            System.out.println("Initial zoom level: " + zoomLevel);
-        }
-
-        // Reset transform and pan to center the map
-        trans = new Affine();
-        pan((float) (-0.56 * (minLon + maxLon) / 2), -(minLat + maxLat) / 2);
-
-        redraw();
     }
 
     private void drawPin(GraphicsContext gc, double x, double y, double size) {

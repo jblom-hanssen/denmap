@@ -1,12 +1,12 @@
 package com.example.osmparsing.utility;
 
 import com.example.osmparsing.algorithms.DirectedEdge;
-import com.example.osmparsing.algorithms.EdgeWeightedDigraph;
+
 import javafx.geometry.Pos;
 import javafx.scene.layout.VBox;
 import javafx.scene.text.Text;
-import javafx.scene.text.TextFlow;
 
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -15,10 +15,8 @@ import java.util.List;
  */
 public class RouteGuidance {
     private final List<DirectedEdge> route;
-    private final GraphBuilder graphBuilder;
-    private final EdgeWeightedDigraph roadGraph;
     private static final float EARTH_RADIUS_KM = 6371.0f; // Earth radius in kilometers
-
+    private final FileBasedGraph fileBasedGraph;
     // Thresholds for navigation decisions
     private static final float TURN_THRESHOLD = 30.0f;           // Minimum angle change to consider a turn significant
     private static final float MIN_SEGMENT_DISTANCE = 0.1f;      // Minimum distance (km) for a navigation segment
@@ -78,10 +76,9 @@ public class RouteGuidance {
         }
     }
 
-    public RouteGuidance(List<DirectedEdge> route, GraphBuilder graphBuilder, EdgeWeightedDigraph roadGraph) {
+    public RouteGuidance(List<DirectedEdge> route, FileBasedGraph fileBasedGraph) {
         this.route = route;
-        this.graphBuilder = graphBuilder;
-        this.roadGraph = roadGraph;
+        this.fileBasedGraph = fileBasedGraph;  // Changed
     }
 
     /**
@@ -156,9 +153,16 @@ public class RouteGuidance {
             int currentVertex = route.get(i-1).to();
 
             if (accumulatedDistance - lastTurnDistance > INTERSECTION_IGNORE_DISTANCE) {
-                // Count outgoing edges from this vertex
-                int connections = roadGraph.outdegree(currentVertex);
-                isMajorIntersection = connections >= 4; // Only consider major intersections (4+ ways)
+                // Count outgoing edges from this vertex using file-based graph
+                try {
+                    List<DirectedEdge> adjacentEdges = fileBasedGraph.getAdjacentEdges(currentVertex);
+                    int connections = adjacentEdges.size();
+                    isMajorIntersection = connections >= 4; // Only consider major intersections (4+ ways)
+                } catch (IOException e) {
+                    // If we can't read the file, assume it's not a major intersection
+                    System.err.println("Error checking intersection: " + e.getMessage());
+                    isMajorIntersection = false;
+                }
             }
 
             // Decide if we need a new segment
@@ -224,8 +228,9 @@ public class RouteGuidance {
      * Calculate the distance of an edge in kilometers
      */
     private float calculateDistance(DirectedEdge edge) {
-        float[] fromCoords = graphBuilder.getCoordinatesForVertex(edge.from());
-        float[] toCoords = graphBuilder.getCoordinatesForVertex(edge.to());
+        float[] fromCoords = fileBasedGraph.getCoordinatesForVertex(edge.from());  // Changed
+        float[] toCoords = fileBasedGraph.getCoordinatesForVertex(edge.to());      // Changed
+
 
         if (fromCoords == null || toCoords == null) {
             return 0.0F;
@@ -244,8 +249,9 @@ public class RouteGuidance {
      * Calculate the bearing (direction) of an edge in degrees (0-360)
      */
     private float calculateBearing(DirectedEdge edge) {
-        float[] fromCoords = graphBuilder.getCoordinatesForVertex(edge.from());
-        float[] toCoords = graphBuilder.getCoordinatesForVertex(edge.to());
+        float[] fromCoords = fileBasedGraph.getCoordinatesForVertex(edge.from());  // Changed
+        float[] toCoords = fileBasedGraph.getCoordinatesForVertex(edge.to());      // Changed
+
 
         if (fromCoords == null || toCoords == null) {
             return 0.0F;

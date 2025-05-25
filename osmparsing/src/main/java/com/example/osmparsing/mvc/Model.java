@@ -20,10 +20,7 @@ import javax.xml.stream.XMLInputFactory;
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamException;
 
-import com.example.osmparsing.utility.FloatMath;
-import com.example.osmparsing.utility.GraphBuilder;
-import com.example.osmparsing.utility.RoadProperties;
-import com.example.osmparsing.utility.TransportMode;
+import com.example.osmparsing.utility.*;
 import com.example.osmparsing.way.StylesUtility;
 import com.example.osmparsing.address.OSMAddress;
 import com.example.osmparsing.address.AddressHandler;
@@ -35,7 +32,7 @@ import javafx.geometry.Point2D;
 public class Model implements Serializable {
     List<Line> list = new ArrayList<Line>();
     public List<Way> ways = new ArrayList<>();
-    private static EdgeWeightedDigraph roadGraph;
+    // private transient EdgeWeightedDigraph roadGraph;
     private AddressHandler addressHandler = new AddressHandler();
     private id2Node id2node = new id2Node(1000000);
     // This collection will hold area features (polygons)
@@ -48,7 +45,10 @@ public class Model implements Serializable {
     public Map<String, ArrayList<Way>> typeWays = new HashMap<>();
     private TransportMode currentTransportMode = TransportMode.CAR;
     private Map<String, Integer> unknownHighwayTypes = new HashMap<>();
-    private Map<String, Integer> skippedHighwayTypes = new HashMap<>();
+    private List<SerializedRoad> serializedRoads = new ArrayList<>();
+    private FileBasedGraph fileBasedGraph;
+    private String baseFilename;
+    private Map<Long, float[]> addressNodeCoordinates = new HashMap<>();
 
 
     // curly braces to create an instance initializer block
@@ -56,6 +56,17 @@ public class Model implements Serializable {
         Set<String> featureTypes = StylesUtility.getAllFeatureTypes();
         for(String featureType : featureTypes) {
             typeWays.put(featureType, new ArrayList<>());
+        }
+    }
+    private static class SerializedRoad implements Serializable {
+        List<Long> nodeIds;
+        String roadType;
+        boolean oneWay;
+
+        SerializedRoad(List<Long> nodeIds, String roadType, boolean oneWay) {
+            this.nodeIds = nodeIds;
+            this.roadType = roadType;
+            this.oneWay = oneWay;
         }
     }
 
@@ -90,6 +101,8 @@ public class Model implements Serializable {
         multiPolygons = new ArrayList<>();
         addressHandler = new AddressHandler();
         kdTree = new KdTree();
+        fileBasedGraph = new FileBasedGraph();
+        addressNodeCoordinates = new HashMap<>();
 
         // Initialize type-specific way collections
         Set<String> featureTypes = StylesUtility.getAllFeatureTypes();
@@ -124,18 +137,23 @@ public class Model implements Serializable {
     private void parsePBF(String filename) throws IOException, XMLStreamException, FactoryConfigurationError, ClassNotFoundException {
         OsmPbfToOsmConverter converter = new OsmPbfToOsmConverter(filename);
         converter.convert();
+        // Store base filename before parsing
+        this.baseFilename = filename.substring(0, filename.lastIndexOf('.'));
         parseOSM(converter.getOutputFile());
     }
 
     private void parseZIP(String filename) throws IOException, XMLStreamException, FactoryConfigurationError {
+        // Store base filename before parsing
+        this.baseFilename = filename.substring(0, filename.length() - 8);  // Remove .osm.zip
         var input = new ZipInputStream(new FileInputStream(filename));
         input.getNextEntry();
         parseOSM(input);
     }
 
     private void parseOSM(String filename) throws FileNotFoundException, XMLStreamException, FactoryConfigurationError {
-            parseOSM(new FileInputStream(filename));
-
+        // Store base filename before parsing
+        this.baseFilename = filename.substring(0, filename.lastIndexOf('.'));
+        parseOSM(new FileInputStream(filename));
     }
 
 
@@ -827,12 +845,23 @@ public class Model implements Serializable {
             System.out.println("=== STARTING GRAPH CONSTRUCTION ===");
             long graphStartTime = System.currentTimeMillis();
 
-            roadGraph = graphBuilder.finalizeGraph();
+            EdgeWeightedDigraph tempGraph = graphBuilder.finalizeGraph();
 
             long graphEndTime = System.currentTimeMillis();
             System.out.println("=== GRAPH CONSTRUCTION COMPLETE ===");
             System.out.println("Graph built in " + (graphEndTime - graphStartTime) + "ms");
-            System.out.println("Final graph: " + graphBuilder.getVertexCount() + " vertices, " + roadGraph.E() + " edges");
+            System.out.println("Final graph: " + graphBuilder.getVertexCount() + " vertices, " + tempGraph.E() + " edges");
+
+            // Save graph to file and immediately discard from memory
+            try {
+                fileBasedGraph.saveGraph(tempGraph, graphBuilder, baseFilename);  // Use the stored baseFilename
+                tempGraph = null;  // Clear immediately
+                graphBuilder = null;  // Also clear GraphBuilder
+                System.gc();
+                System.out.println("Graph saved to: " + baseFilename + ".graph");
+            } catch (IOException e) {
+                throw new RuntimeException("Failed to save graph to file: " + e.getMessage());
+            }
         }
 
         // Continue with rest of processing...
@@ -885,7 +914,6 @@ public class Model implements Serializable {
                 System.out.println("  - " + featureType + ": " + count + " ways");
             }
         }
-        quickPerformanceDiagnostic();
 
         System.out.println("=== OSM PROCESSING COMPLETE ===");
     }
@@ -944,14 +972,9 @@ public class Model implements Serializable {
     }
     //Creating graph methods
     public EdgeWeightedDigraph buildRoadGraph() {
-        // Graph is always built during parsing now, so just return it
-        if (roadGraph == null) {
-            throw new IllegalStateException("Road graph should have been built during parsing!");
-        }
-
-        System.out.println("buildRoadGraph() called - returning graph built during parsing with " +
-                graphBuilder.getVertexCount() + " vertices");
-        return roadGraph;
+        // This method is no longer used but kept for compatibility
+        System.out.println("buildRoadGraph() called but using file-based storage");
+        return null;
     }
 
     /**
@@ -968,67 +991,26 @@ public class Model implements Serializable {
      * Get road graph with segment handling
      */
     public EdgeWeightedDigraph getRoadGraph() {
-        if (roadGraph == null) {
-            throw new IllegalStateException("Road graph should have been built during parsing!");
-        }
-        return roadGraph;
+        throw new UnsupportedOperationException(
+                "In-memory graph not available. Use getFileBasedGraph() for routing."
+        );
+    }
+
+    public FileBasedGraph getFileBasedGraph() {
+        return fileBasedGraph;
     }
 
     public int findNearestVertex(float x, float y) {
-        if (graphBuilder == null) {
-            buildRoadGraph(); // Ensure graph is built
+        // Use file-based graph if available
+        if (fileBasedGraph != null && fileBasedGraph.graphFileExists()) {
+            return fileBasedGraph.findNearestVertex(x, y);
         }
 
-        // FIX: Ensure we're searching with a sufficient radius
-        int nearestVertex = graphBuilder.findNearestVertex(x, y);
+        // Fallback error
+        System.err.println("ERROR: No graph available for finding nearest vertex");
+        return -1;
 
-        // Verify the found vertex is connected to the road network
-        if (nearestVertex >= 0) {
-            EdgeWeightedDigraph graph = getRoadGraph();
-            if (graph.outdegree(nearestVertex) == 0 && graph.indegree(nearestVertex) == 0) {
-                System.out.println("WARNING: Nearest vertex has no connections. Searching for a connected vertex...");
-                nearestVertex = findNearestConnectedVertex(x, y);
-            }
-        }
-
-        return nearestVertex;
     }
-    private int findNearestConnectedVertex(float x, float y) {
-        if (graphBuilder == null) return -1;
-
-        EdgeWeightedDigraph graph = getRoadGraph();
-        float minDistance = Float.MAX_VALUE;
-        int bestVertex = -1;
-
-        // Only check a subset of vertices for performance
-        int maxVerticesToCheck = Math.min(5000, graphBuilder.getVertexCount());
-        int step = Math.max(1, graphBuilder.getVertexCount() / maxVerticesToCheck);
-
-        for (int v = 0; v < graphBuilder.getVertexCount(); v += step) {
-            // Skip unconnected vertices
-            if (graph.outdegree(v) == 0 && graph.indegree(v) == 0) continue;
-
-            float[] coords = graphBuilder.getCoordinatesForVertex(v);
-            if (coords != null) {
-                float dist = calculateDistance(x, y, coords[0], coords[1]);
-                if (dist < minDistance) {
-                    minDistance = dist;
-                    bestVertex = v;
-                }
-            }
-        }
-
-        System.out.println("Found connected vertex " + bestVertex + " at distance " + minDistance);
-        return bestVertex;
-    }
-    private float calculateDistance(float x1, float y1, float x2, float y2) {
-        float dx = x2 - x1;
-        float dy = y2 - y1;
-        return FloatMath.sqrt(dx * dx + dy * dy);
-    }
-    /**
-     * Override finalize to ensure resources are cleaned up
-     */
 
     // Address-related methods
     public AddressHandler getAddressHandler() {
@@ -1056,30 +1038,19 @@ public class Model implements Serializable {
     public float[] getNodeCoordinates(long nodeId) {
         System.out.println("DEBUG: Getting coordinates for node ID " + nodeId);
 
-        // First try to get coordinates from the graph builder (if the node is a vertex)
-        if (graphBuilder != null) {
-            int vertex = graphBuilder.getVertexForNodeId(nodeId);
-            System.out.println("DEBUG: Node " + nodeId + " maps to vertex " + vertex);
+        // Check address node coordinates first (these survive serialization)
+        float[] coords = addressNodeCoordinates.get(nodeId);
+        if (coords != null) {
+            System.out.println("DEBUG: Found address node coordinates: [" + coords[0] + ", " + coords[1] + "]");
+            return coords;
+        }
 
-            if (vertex >= 0) {
-                float[] coords = graphBuilder.getCoordinatesForVertex(vertex);
-                if (coords != null) {
-                    System.out.println("DEBUG: Found vertex coordinates: [" + coords[0] + ", " + coords[1] + "]");
-                    return coords;
-                }
-            }
-
-            // FALLBACK: If node is not a vertex, get coordinates from stored node data
-            // This is important for address nodes that aren't at intersections
-            float[] storedCoords = graphBuilder.getStoredNodeCoordinates(nodeId);
-            if (storedCoords != null) {
-                System.out.println("DEBUG: Found stored node coordinates: [" + storedCoords[0] + ", " + storedCoords[1] + "]");
-                return storedCoords;
-            } else {
-                System.out.println("DEBUG: No stored coordinates found for node " + nodeId);
-            }
-        } else {
-            System.out.println("DEBUG: GraphBuilder is null");
+        // If not an address node, it might be a graph vertex
+        if (fileBasedGraph != null) {
+            // Check if this node is a vertex in the graph
+            // Note: We'd need to add a nodeId->vertex mapping in FileBasedGraph for this
+            // For now, we can't look up by nodeId in the graph
+            System.out.println("DEBUG: Node " + nodeId + " not found in address coordinates");
         }
 
         System.out.println("DEBUG: No coordinates found for node " + nodeId);
@@ -1103,98 +1074,5 @@ public class Model implements Serializable {
     public TransportMode getTransportMode() {
         return currentTransportMode;
     }
-    public void quickPerformanceDiagnostic() {
-        System.out.println("\n=== QUICK PERFORMANCE DIAGNOSTIC ===");
 
-        // 1. What percentage were highways that got skipped?
-        int totalHighways = roadWaysProcessed +
-                (unknownHighwayTypes != null ? unknownHighwayTypes.values().stream().mapToInt(Integer::intValue).sum() : 0);
-        int skippedHighways = unknownHighwayTypes != null ?
-                unknownHighwayTypes.values().stream().mapToInt(Integer::intValue).sum() : 0;
-
-        System.out.println("\n1. HIGHWAY SKIPPING IMPACT:");
-        System.out.println("Total highway ways: " + totalHighways);
-        System.out.println("Skipped highways: " + skippedHighways);
-        System.out.println("Percentage skipped: " + (totalHighways > 0 ? 100.0 * skippedHighways / totalHighways : 0) + "%");
-
-        if (skippedHighways < totalHighways * 0.05) {
-            System.out.println("❌ Less than 5% skipped - explains why no performance gain!");
-        }
-
-        // 2. What's actually taking up memory/rendering time?
-        System.out.println("\n2. BIGGEST DATA CONSUMERS:");
-
-        Map<String, Integer> typeCounts = new HashMap<>();
-
-        for (Map.Entry<String, ArrayList<Way>> entry : typeWays.entrySet()) {
-            int count = entry.getValue().size();
-            typeCounts.put(entry.getKey(), count);
-        }
-
-        // FIX: Calculate totalWays as final
-        final int totalWays = typeCounts.values().stream()
-                .mapToInt(Integer::intValue)
-                .sum();
-
-        // Now totalWays is effectively final and can be used in lambda
-        typeCounts.entrySet().stream()
-                .sorted(Map.Entry.<String, Integer>comparingByValue().reversed())
-                .limit(5)
-                .forEach(e -> System.out.printf("  %s: %,d ways (%.1f%%)\n",
-                        e.getKey(), e.getValue(), 100.0 * e.getValue() / totalWays));
-
-        // 3. The REAL performance killers
-        System.out.println("\n3. LIKELY PERFORMANCE BOTTLENECKS:");
-
-        int buildings = typeCounts.getOrDefault("building", 0);
-        if (buildings > 50000) {
-            System.out.println("🔴 BUILDINGS: " + buildings + " - Major impact on rendering!");
-            System.out.println("   Fix: Skip buildings when zoomed out");
-        }
-
-        int naturalFeatures =
-                typeCounts.getOrDefault("forest", 0) +
-                        typeCounts.getOrDefault("grass", 0) +
-                        typeCounts.getOrDefault("farmland", 0) +
-                        typeCounts.getOrDefault("water", 0);
-
-        if (naturalFeatures > 30000) {
-            System.out.println("🔴 NATURAL FEATURES: " + naturalFeatures + " - Complex polygons slow rendering!");
-            System.out.println("   Fix: Simplify geometries for low zoom levels");
-        }
-
-        int minorRoads =
-                typeCounts.getOrDefault("serviceroad", 0) +
-                        typeCounts.getOrDefault("path", 0) +
-                        typeCounts.getOrDefault("track", 0) +
-                        typeCounts.getOrDefault("footway", 0);
-
-        if (minorRoads > 50000) {
-            System.out.println("🔴 MINOR ROADS/PATHS: " + minorRoads + " - Too many for overview!");
-            System.out.println("   Fix: Hide these at low zoom levels");
-        }
-
-        // 4. Quick fixes that will actually help
-        System.out.println("\n4. RECOMMENDED OPTIMIZATIONS:");
-        System.out.println("Based on your data, try these in order:");
-
-        List<String> recommendations = new ArrayList<>();
-
-        if (buildings > 50000) {
-            recommendations.add("1. Skip buildings: if (k.equals(\"building\") && zoomLevel < 15) { skipCurrentWay = true; }");
-        }
-
-        if (naturalFeatures > 30000) {
-            recommendations.add("2. Simplify large polygons: Reduce points in forests/water when zoomed out");
-        }
-
-        if (minorRoads > 50000) {
-            recommendations.add("3. Filter minor roads: Skip service roads, paths, tracks at low zoom");
-        }
-
-        recommendations.add("4. Implement viewport culling: Only process ways visible on screen");
-        recommendations.add("5. Add LOD system: Different detail levels for different zoom levels");
-
-        recommendations.forEach(System.out::println);
-    }
 }

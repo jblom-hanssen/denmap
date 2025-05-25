@@ -1,10 +1,9 @@
 package com.example.osmparsing.utility;
-import com.example.osmparsing.utility.RoadProperties;
-import com.example.osmparsing.utility.TransportMode;
+
 import com.example.osmparsing.algorithms.DirectedEdge;
 import com.example.osmparsing.algorithms.EdgeWeightedDigraph;
 import com.example.osmparsing.mvc.Model;
-import com.example.osmparsing.way.Node;
+
 import com.example.osmparsing.way.Way;
 
 import java.util.*;
@@ -27,7 +26,6 @@ public class GraphBuilder implements Serializable {
     private List<RoadData> roadDataList = new ArrayList<>();
     public Map<Long, float[]> nodeCoordinateCache = new HashMap<>(); // Cache for node coordinates
     private Map<String, RoadProperties> edgeProperties = new HashMap<>(); // Key: "from-to"
-    private TransportMode currentMode = TransportMode.CAR;
 
     // Statistics
     private int intersectionCount = 0;
@@ -230,26 +228,6 @@ public class GraphBuilder implements Serializable {
     }
 
     /**
-     * Find coordinates for a node by searching through cached data
-     */
-    private float[] findNodeCoordinates(long nodeId) {
-        // First check cached coordinates
-        float[] cached = nodeCoordinateCache.get(nodeId);
-        if (cached != null) {
-            return cached;
-        }
-
-        // Then check if we have stored coordinates from parsing
-        float[] stored = model.getGraphBuilder().getStoredNodeCoordinates(nodeId);
-        if (stored != null) {
-            nodeCoordinateCache.put(nodeId, stored);
-            return stored;
-        }
-
-        return null;
-    }
-
-    /**
      * Add intermediate vertices for long segments
      */
     private void addIntermediateVertices(RoadData road, Set<Long> intersectionNodes) {
@@ -392,54 +370,6 @@ public class GraphBuilder implements Serializable {
         System.out.println("Time taken: " + (edgeEnd - edgeStart) + "ms");
     }
 
-    private void debugWhyNoEdges() {
-        System.err.println("\n=== DEBUGGING WHY NO EDGES ===");
-
-        // Check if we have any road data
-        System.err.println("Number of roads in roadDataList: " + roadDataList.size());
-        if (roadDataList.isEmpty()) {
-            System.err.println("ERROR: No roads were stored for processing!");
-            return;
-        }
-
-        // Sample first few roads
-        for (int i = 0; i < Math.min(5, roadDataList.size()); i++) {
-            RoadData road = roadDataList.get(i);
-            System.err.println("\nRoad " + i + ":");
-            System.err.println("  Type: " + road.roadType);
-            System.err.println("  One-way: " + road.isOneWay);
-            System.err.println("  Node count: " + (road.nodeIds != null ? road.nodeIds.size() : "null"));
-
-            if (road.nodeIds != null && !road.nodeIds.isEmpty()) {
-                System.err.println("  First node ID: " + road.nodeIds.get(0));
-                System.err.println("  Last node ID: " + road.nodeIds.get(road.nodeIds.size() - 1));
-
-                // Check if these nodes have vertices
-                Integer firstVertex = nodeToVertex.get(road.nodeIds.get(0));
-                Integer lastVertex = nodeToVertex.get(road.nodeIds.get(road.nodeIds.size() - 1));
-
-                System.err.println("  First node vertex: " + firstVertex);
-                System.err.println("  Last node vertex: " + lastVertex);
-            }
-        }
-
-        // Check graph capacity
-        System.err.println("\nGraph capacity: " + graph.V());
-        System.err.println("Vertex count: " + vertexCount);
-
-        // Check if vertex IDs are within bounds
-        int outOfBoundsCount = 0;
-        for (Integer vertex : nodeToVertex.values()) {
-            if (vertex >= graph.V()) {
-                outOfBoundsCount++;
-            }
-        }
-        if (outOfBoundsCount > 0) {
-            System.err.println("ERROR: " + outOfBoundsCount +
-                    " vertices have IDs >= graph capacity!");
-        }
-    }
-
     /**
      * Create a vertex for a specific node in a way
      */
@@ -549,20 +479,6 @@ public class GraphBuilder implements Serializable {
                 "bridleway", "steps").contains(roadType);
     }
 
-    private float getSimpleWeight(String roadType) {
-        return switch (roadType) {
-            case "motorway", "motorway_link" -> 1.0f;
-            case "trunk", "trunk_link" -> 2.0f;
-            case "primary", "primary_link" -> 3.0f;
-            case "secondary", "secondary_link" -> 4.0f;
-            case "tertiary", "tertiary_link" -> 5.0f;
-            case "residentialroad" -> 8.0f;
-            case "serviceroad" -> 10.0f;
-            case "unclassifiedhighway" -> 12.0f;
-            default -> 15.0f;
-        };
-    }
-
     public void storeNodeCoordinates(long nodeId, float x, float y) {
         nodeCoordinateCache.put(nodeId, new float[]{x, y});
     }
@@ -594,62 +510,6 @@ public class GraphBuilder implements Serializable {
         return vertexCount;
     }
 
-    public int findNearestVertex(float x, float y) {
-        int nearest = -1;
-        float minDist = Float.MAX_VALUE;
-
-        for (int v = 0; v < vertexCount; v++) {
-            float[] coords = vertexCoords.get(v);
-            if (coords != null) {
-                float dx = x - coords[0];
-                float dy = y - coords[1];
-                float dist = dx * dx + dy * dy;
-                if (dist < minDist) {
-                    minDist = dist;
-                    nearest = v;
-                }
-            }
-        }
-        return nearest;
-    }
-
-    public boolean areConnected(int v1, int v2) {
-        if (v1 < 0 || v2 < 0 || v1 >= vertexCount || v2 >= vertexCount) return false;
-
-        boolean[] visited = new boolean[vertexCount];
-        Queue<Integer> queue = new LinkedList<>();
-        visited[v1] = true;
-        queue.add(v1);
-
-        while (!queue.isEmpty()) {
-            int v = queue.poll();
-            if (v == v2) return true;
-
-            for (DirectedEdge e : graph.adj(v)) {
-                int w = e.to();
-                if (w < visited.length && !visited[w]) {
-                    visited[w] = true;
-                    queue.add(w);
-                }
-            }
-        }
-        return false;
-    }
-
-    public EdgeWeightedDigraph getGraphForVertex(int v) {
-        return graph;
-    }
-
-    public List<EdgeWeightedDigraph> getAllGraphSegments() {
-        return List.of(graph);
-    }
-
-    public void cleanup() {
-        roadDataList.clear();
-        nodeUsageCount.clear();
-        nodeCoordinateCache.clear();
-        System.out.println("Cleanup complete");
-    }
     private String createEdgeKey(int from, int to) {
         return from + "-" + to;
     }
@@ -711,36 +571,5 @@ public class GraphBuilder implements Serializable {
         };
     }
 
-    /**
-     * Alternative: Calculate weight based on travel time
-     */
-    private float calculateTimeBasedWeight(float distanceKm, String roadType) {
-        // Get typical speed for road type (km/h)
-        float speedKmh = switch (roadType) {
-            case "motorway" -> 110.0f;
-            case "motorway_link" -> 80.0f;
-            case "trunk" -> 90.0f;
-            case "trunk_link" -> 70.0f;
-            case "primary" -> 80.0f;
-            case "primary_link" -> 60.0f;
-            case "secondary" -> 70.0f;
-            case "secondary_link" -> 50.0f;
-            case "tertiary" -> 60.0f;
-            case "tertiary_link" -> 40.0f;
-            case "unclassifiedhighway" -> 50.0f;
-            case "residentialroad" -> 30.0f;
-            case "living_street" -> 20.0f;
-            case "serviceroad" -> 20.0f;
-            case "cycleway" -> 20.0f;
-            case "track" -> 30.0f;
-            case "path" -> 10.0f;
-            case "footway" -> 5.0f;
-            default -> 40.0f;
-        };
 
-        // Calculate time in minutes
-        float timeMinutes = (distanceKm / speedKmh) * 60.0f;
-
-        return timeMinutes;
-    }
 }

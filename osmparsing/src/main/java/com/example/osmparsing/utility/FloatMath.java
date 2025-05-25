@@ -5,8 +5,6 @@ package com.example.osmparsing.utility;
  */
 public final class FloatMath {
     private static final float PI = (float) Math.PI;
-    private static final float TWO_PI = 2.0f * PI;
-    private static final float HALF_PI = 0.5f * PI;
     private static final float RAD_TO_DEG = 180.0f / PI;
     private static final float DEG_TO_RAD = PI / 180.0f;
 
@@ -41,12 +39,7 @@ public final class FloatMath {
         return (float) Math.cos(radians);
     }
 
-    /**
-     * Calculate tangent of an angle in radians
-     */
-    public static float tan(float radians) {
-        return (float) Math.tan(radians);
-    }
+
 
     /**
      * Calculate arc tangent of y/x
@@ -69,12 +62,7 @@ public final class FloatMath {
         return (float) Math.pow(value, exponent);
     }
 
-    /**
-     * Calculate absolute value
-     */
-    public static float abs(float value) {
-        return Math.abs(value);
-    }
+
     public static float min(float a, float b) {
         return Math.min(a, b);
     }

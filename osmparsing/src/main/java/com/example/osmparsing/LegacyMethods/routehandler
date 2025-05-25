@@ -1,0 +1,132 @@
+public void debugRouteDetails(String startAddressStr, String endAddressStr) {
+        System.out.println("\n=== ROUTE DEBUGGING ===");
+        System.out.println("From: " + startAddressStr);
+        System.out.println("To: " + endAddressStr);
+
+        // Ensure graph is built
+        if (model.getRoadGraph() == null) {
+            model.buildRoadGraph();
+        }
+
+        EdgeWeightedDigraph roadGraph = model.getRoadGraph();
+        AddressHandler addressHandler = model.getAddressHandler();
+
+        // Find the addresses
+        OSMAddress startAddress = findBestMatchingAddress(addressHandler, startAddressStr);
+        OSMAddress endAddress = findBestMatchingAddress(addressHandler, endAddressStr);
+
+        if (startAddress == null || endAddress == null) {
+            System.out.println("ERROR: One or both addresses not found");
+            return;
+        }
+
+        // Get node coordinates
+        float[] startCoords = model.getNodeCoordinates(startAddress.getNodeId());
+        float[] endCoords = model.getNodeCoordinates(endAddress.getNodeId());
+
+        if (startCoords == null || endCoords == null) {
+            System.out.println("ERROR: Could not get coordinates for addresses");
+            return;
+        }
+
+        System.out.println("Start node ID: " + startAddress.getNodeId());
+        System.out.println("Start coordinates: [" + startCoords[0] + ", " + startCoords[1] + "]");
+        System.out.println("End node ID: " + endAddress.getNodeId());
+        System.out.println("End coordinates: [" + endCoords[0] + ", " + endCoords[1] + "]");
+
+        // Find nearest vertices WITHOUT transforming coordinates
+        int startVertex = model.findNearestVertex(startCoords[0], startCoords[1]);
+        int endVertex = model.findNearestVertex(endCoords[0], endCoords[1]);
+
+        System.out.println("Start vertex: " + startVertex);
+        System.out.println("End vertex: " + endVertex);
+
+        if (startVertex < 0 || endVertex < 0) {
+            System.out.println("ERROR: Could not find network vertices");
+            return;
+        }
+
+        // Check vertex connectivity
+        System.out.println("Start vertex connections: " +
+                roadGraph.outdegree(startVertex) + " outgoing, " +
+                roadGraph.indegree(startVertex) + " incoming");
+        System.out.println("End vertex connections: " +
+                roadGraph.outdegree(endVertex) + " outgoing, " +
+                roadGraph.indegree(endVertex) + " incoming");
+
+        // Get the path
+        List<DirectedEdge> route = findRoute(startAddressStr, endAddressStr);
+
+        if (route != null && !route.isEmpty()) {
+            System.out.println("Route found with " + route.size() + " edges");
+
+            // Calculate and print detailed route information
+            GraphBuilder builder = model.getGraphBuilder();
+            float totalDist = 0;
+
+            System.out.println("\nDetailed route segment information:");
+            System.out.println("-----------------------------------");
+
+            for (int i = 0; i < route.size(); i++) {
+                DirectedEdge edge = route.get(i);
+                float[] fromCoords = builder.getCoordinatesForVertex(edge.from());
+                float[] toCoords = builder.getCoordinatesForVertex(edge.to());
+
+                float dist = calculateHaversineDistance(
+                        fromCoords[0], fromCoords[1],
+                        toCoords[0], toCoords[1]);
+
+                totalDist += dist;
+
+                System.out.printf("Edge %d: %d -> %d, Weight=%.5f, Distance=%.3f km\n",
+                        i, edge.from(), edge.to(), edge.weight(), dist);
+                System.out.printf("  From: [%.6f, %.6f]\n", fromCoords[0], fromCoords[1]);
+                System.out.printf("  To:   [%.6f, %.6f]\n", toCoords[0], toCoords[1]);
+            }
+
+            System.out.println("\nTotal route distance: " + totalDist + " km");
+            System.out.println("Average distance per segment: " + (totalDist / route.size()) + " km");
+
+            // Check if there might be missing segments
+            float directDistance = calculateHaversineDistance(
+                    startCoords[0], startCoords[1],
+                    endCoords[0], endCoords[1]);
+
+            System.out.println("Direct (straight-line) distance: " + directDistance + " km");
+            System.out.println("Route/direct ratio: " + (totalDist / directDistance));
+
+            if (totalDist / directDistance < 1.1) {
+                System.out.println("WARNING: Route is very close to straight-line distance!");
+                System.out.println("This suggests the route may be missing intermediate road segments.");
+            }
+        } else {
+            System.out.println("No route found between these addresses");
+        }
+
+        System.out.println("=== END DEBUGGING ===\n");
+    }
+
+private float calculateHaversineDistance(float lon1, float lat1, float lon2, float lat2) {
+        // Convert to radians
+        float latRad1 = FloatMath.toRadians(lat1);
+        float lonRad1 = FloatMath.toRadians(lon1);
+        float latRad2 = FloatMath.toRadians(lat2);
+        float lonRad2 = FloatMath.toRadians(lon2);
+
+        // Haversine formula
+        float dLat = latRad2 - latRad1;
+        float dLon = lonRad2 - lonRad1;
+
+        float sinDLatHalf = FloatMath.sin(dLat/2);
+        float sinDLonHalf = FloatMath.sin(dLon/2);
+
+        float a = sinDLatHalf * sinDLatHalf +
+                FloatMath.cos(latRad1) * FloatMath.cos(latRad2) *
+                        sinDLonHalf * sinDLonHalf;
+
+        float c = 2.0f * FloatMath.atan2(FloatMath.sqrt(a), FloatMath.sqrt(1.0f - a));
+
+        // Earth radius in kilometers
+        float earthRadiusKm = 6371.0f;
+        return earthRadiusKm * c;
+    }

@@ -1,0 +1,11 @@
+  public Point2D mousetoModel(float lastX, float lastY) {
+        try {
+            return trans.inverseTransform(lastX, lastY);
+        } catch (NonInvertibleTransformException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+public HBox getToolbar() {
+        return toolbar;
+    }

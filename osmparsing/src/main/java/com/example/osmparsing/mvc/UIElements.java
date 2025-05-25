@@ -404,8 +404,7 @@ public class UIElements {
             // Generate and print route guidance
             RouteGuidance guidance = new RouteGuidance(
                     route,
-                    model.getGraphBuilder(),
-                    model.getRoadGraph()
+                    model.getFileBasedGraph()  // Changed from getGraphBuilder()
             );
             guidance.printRoute();
             routeVBox = guidance.routeToText();

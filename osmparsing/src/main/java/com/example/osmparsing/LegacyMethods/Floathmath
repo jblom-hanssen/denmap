@@ -1,0 +1,10 @@
+ private static final float TWO_PI = 2.0f * PI;
+ private static final float HALF_PI = 0.5f * PI;
+
+ public static float abs(float value) {
+        return Math.abs(value);
+    }
+
+public static float tan(float radians) {
+            return (float) Math.tan(radians);
+        }

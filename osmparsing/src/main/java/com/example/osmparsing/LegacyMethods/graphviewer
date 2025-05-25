@@ -1,0 +1,37 @@
+   private Point2D screenToModel(float x, float y) {
+        try {
+            return transform.inverseTransform(x, y);
+        } catch (NonInvertibleTransformException e) {
+            e.printStackTrace();
+            return new Point2D(0, 0);
+        }
+    }
+
+    private void calculateBounds() {
+        if (model == null || model.ways.isEmpty()) return;
+
+        // Start with extreme initial values
+        float minLon = Float.MAX_VALUE;
+        float maxLon = Float.MIN_VALUE;
+        float minLat = Float.MAX_VALUE;
+        float maxLat = Float.MIN_VALUE;
+
+        // Iterate through all ways and their coordinates
+        for (Way way : model.ways) {
+            for (Node node : way.nodes) {
+                float lon = node.lon / 0.56f;  // Reverse the scaling applied in Way constructor
+                float lat = -node.lat;        // Reverse the negation applied in Way constructor
+
+                minLon = FloatMath.min(minLon, lon);
+                maxLon = FloatMath.max(maxLon, lon);
+                minLat = FloatMath.min(minLat, lat);
+                maxLat = FloatMath.max(maxLat, lat);
+            }
+        }
+
+        // Store the calculated bounds
+        this.minLon = minLon;
+        this.maxLon = maxLon;
+        this.minLat = minLat;
+        this.maxLat = maxLat;
+    }

@@ -17,7 +17,6 @@ public class PrintHandler extends DefaultHandler {
     int spaces = 0;
     StringBuilder output = new StringBuilder();
     Map<String, Set<String>> attributes_map = new HashMap<>();
-    Set<String> unique_attributes = new HashSet<>();
     List<String> listWithKeyAttributes = new ArrayList<>();
 
     // For multipolygon tracking

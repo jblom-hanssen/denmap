@@ -1,7 +1,8 @@
 package com.example.osmparsing.algorithms;
 
 import com.example.osmparsing.utility.FloatMath;
-
+import com.example.osmparsing.utility.FileBasedGraph;
+import java.io.IOException;
 import java.util.*;
 
 /**
@@ -21,6 +22,8 @@ public class AStarSP {
     private boolean pathFound = false;        // Flag for path discovery
     private List<DirectedEdge> foundPath = null; // Cached path if found
     private final int pqMaxSize;              // Maximum priority queue size
+    private final FileBasedGraph fileBasedGraph;
+    private final boolean useFileBasedGraph;
 
     // Constants to control memory usage
     private static final int DEFAULT_PQ_SIZE = 2000000;
@@ -37,6 +40,8 @@ public class AStarSP {
      * @param vertexCoords Coordinates of all vertices
      */
     public AStarSP(EdgeWeightedDigraph G, int s, int t, float[] targetCoords, float[][] vertexCoords) {
+        this.fileBasedGraph = null;
+        this.useFileBasedGraph = false;
         this.source = s;
         this.target = t;
         this.targetCoords = targetCoords;
@@ -160,6 +165,79 @@ public class AStarSP {
         heuristicMap = null;
         pq = null;
     }
+    public AStarSP(FileBasedGraph fbGraph, int s, int t, float[] targetCoords) {
+        this.fileBasedGraph = fbGraph;
+        this.useFileBasedGraph = true;
+        this.source = s;
+        this.target = t;
+        this.targetCoords = targetCoords;
+        this.vertexCoords = null; // Not needed for file-based
+        this.pqMaxSize = fbGraph.getVertexCount();
+
+        System.out.println("Starting file-based A* search from " + s + " to " + t);
+        System.out.println("Graph has " + fbGraph.getVertexCount() + " vertices");
+        long startTime = System.currentTimeMillis();
+
+        // Run the same search logic
+        runFileBasedSearch();
+    }
+    private void runFileBasedSearch() {
+        // Initialize distance array
+        distTo = new float[fileBasedGraph.getVertexCount()];
+        for (int v = 0; v < fileBasedGraph.getVertexCount(); v++) {
+            distTo[v] = Float.POSITIVE_INFINITY;
+        }
+        distTo[source] = 0.0f;
+
+        // Initialize edge array
+        edgeTo = new DirectedEdge[fileBasedGraph.getVertexCount()];
+
+        // Initialize priority queue
+        pq = new IndexMinPQ<Float>(pqMaxSize);
+
+        // Compute heuristic for source and add to priority queue
+        float sourceHeuristic = computeHeuristic(source);
+        pq.insert(source, distTo[source] + sourceHeuristic);
+
+        // A* search
+        int verticesExpanded = 0;
+
+        while (!pq.isEmpty() && verticesExpanded < MAX_VERTICES_EXPANDED) {
+            int v = pq.delMin();
+            verticesExpanded++;
+
+            // Log progress periodically
+            if (verticesExpanded % PROGRESS_REPORT_INTERVAL == 0) {
+                System.out.printf("A* search: expanded %,d vertices, queue size: %,d%n",
+                        verticesExpanded, pq.size());
+            }
+
+            // Check if we reached the target
+            if (v == target) {
+                pathFound = true;
+                break;
+            }
+
+            // Relax outgoing edges from file
+            try {
+                for (DirectedEdge e : fileBasedGraph.getAdjacentEdges(v)) {
+                    relax(e);
+                }
+            } catch (IOException ex) {
+                System.err.println("Error reading graph file: " + ex.getMessage());
+                break;
+            }
+        }
+
+        // Extract and cache the path if found
+        if (pathFound) {
+            foundPath = extractPath();
+            System.out.println("A* search complete: path found");
+            System.out.println("Path length: " + foundPath.size() + " edges");
+        } else {
+            System.out.println("A* search terminated: no path exists to target");
+        }
+    }
 
     /**
      * Relaxes edge e and updates the priority queue if needed
@@ -213,15 +291,27 @@ public class AStarSP {
      * Compute heuristic value for a vertex
      */
     private float computeHeuristic(int v) {
-        if (targetCoords == null || vertexCoords == null ||
-                vertexCoords[v] == null || targetCoords.length < 2) {
-            return 0.0f;
-        }
+        if (useFileBasedGraph) {
+            // File-based graph
+            float[] coords = fileBasedGraph.getCoordinatesForVertex(v);
+            if (coords == null || targetCoords == null) return 0.0f;
 
-        return calculateHaversineDistance(
-                vertexCoords[v][0], vertexCoords[v][1],
-                targetCoords[0], targetCoords[1]
-        );
+            return calculateHaversineDistance(
+                    coords[0], coords[1],
+                    targetCoords[0], targetCoords[1]
+            );
+        } else {
+            // Original in-memory graph logic
+            if (targetCoords == null || vertexCoords == null ||
+                    v >= vertexCoords.length || vertexCoords[v] == null) {
+                return 0.0f;
+            }
+
+            return calculateHaversineDistance(
+                    vertexCoords[v][0], vertexCoords[v][1],
+                    targetCoords[0], targetCoords[1]
+            );
+        }
     }
 
     private float calculateHaversineDistance(float lon1, float lat1, float lon2, float lat2) {

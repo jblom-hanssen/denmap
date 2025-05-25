@@ -19,13 +19,8 @@ public class RoadProperties implements Serializable {
         this.bicycleAllowed = bicycleAllowed;
         this.carAllowed = carAllowed;
     }
-
-    public String getWayName() { return wayName; }  // ADD THIS
     public String getRoadType() { return roadType; }
-    public int getSpeedLimit() { return speedLimit; }
-    public boolean isOneWay() { return oneWay; }
-    public boolean isBicycleAllowed() { return bicycleAllowed; }
-    public boolean isCarAllowed() { return carAllowed; }
+
 
     public boolean isAccessibleBy(TransportMode mode) {
         if (mode == TransportMode.CAR) {
