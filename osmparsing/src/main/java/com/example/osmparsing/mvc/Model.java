@@ -14,11 +14,13 @@ import java.io.ObjectOutputStream;
 import java.io.Serializable;
 import java.util.*;
 import java.util.zip.ZipInputStream;
+import java.util.zip.ZipEntry;
 
 import javax.xml.stream.FactoryConfigurationError;
 import javax.xml.stream.XMLInputFactory;
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamException;
+import javax.xml.stream.XMLStreamReader;
 
 import com.example.osmparsing.utility.*;
 import com.example.osmparsing.way.StylesUtility;
@@ -32,9 +34,16 @@ import javafx.geometry.Point2D;
 public class Model implements Serializable {
     List<Line> list = new ArrayList<Line>();
     public List<Way> ways = new ArrayList<>();
-    // private transient EdgeWeightedDigraph roadGraph;
     private AddressHandler addressHandler = new AddressHandler();
-    private id2Node id2node = new id2Node(1000000);
+
+    // OPTIMIZED: Replace id2node with more efficient storage
+    private transient SortedNodeList sortedNodes;
+
+    // OPTIMIZED: Pre-processing data structures
+    private transient Set<Long> requiredNodes = new HashSet<>();
+    public transient Set<Long> intersectionNodes = new HashSet<>();
+    private transient long currentParsingNodeId = -1;
+
     // This collection will hold area features (polygons)
     List<MultiPolygon> multiPolygons = new ArrayList<>();
     KdTree kdTree = new KdTree();
@@ -50,7 +59,6 @@ public class Model implements Serializable {
     private String baseFilename;
     private Map<Long, float[]> addressNodeCoordinates = new HashMap<>();
 
-
     // curly braces to create an instance initializer block
     {
         Set<String> featureTypes = StylesUtility.getAllFeatureTypes();
@@ -58,6 +66,7 @@ public class Model implements Serializable {
             typeWays.put(featureType, new ArrayList<>());
         }
     }
+
     private static class SerializedRoad implements Serializable {
         List<Long> nodeIds;
         String roadType;
@@ -78,19 +87,20 @@ public class Model implements Serializable {
         if (graphBuilder == null) {
             System.out.println("Initializing GraphBuilder for two-pass construction");
             graphBuilder = new GraphBuilder(this);
-            // Don't create graph here - wait for finalization
         }
     }
-
 
     public static Model load(String filename) throws FileNotFoundException, IOException, ClassNotFoundException, XMLStreamException, FactoryConfigurationError {
         if (filename.endsWith(".obj")) {
             try (var in = new ObjectInputStream(new BufferedInputStream(new FileInputStream(filename)))) {
-                return (Model) in.readObject();
+                Model model = (Model) in.readObject();
+                // Reinitialize transient fields
+                model.requiredNodes = new HashSet<>();
+                model.intersectionNodes = new HashSet<>();
+                return model;
             }
         }
         Model model = new Model(filename);
-
         model.save(filename + ".obj");
         return model;
     }
@@ -103,6 +113,8 @@ public class Model implements Serializable {
         kdTree = new KdTree();
         fileBasedGraph = new FileBasedGraph();
         addressNodeCoordinates = new HashMap<>();
+        requiredNodes = new HashSet<>();
+        intersectionNodes = new HashSet<>();
 
         // Initialize type-specific way collections
         Set<String> featureTypes = StylesUtility.getAllFeatureTypes();
@@ -114,9 +126,19 @@ public class Model implements Serializable {
         if (buildGraphDuringParsing) {
             initializeRoadGraph();
         }
+
+        // OPTIMIZED: Two-pass parsing with pre-processing
         if (filename.endsWith(".osm.zip")) {
+            this.baseFilename = filename.substring(0, filename.length() - 8);
+            // First pass - identify required nodes
+            requiredNodes = identifyRequiredNodes(filename);
+            // Second pass - parse with filtering
             parseZIP(filename);
         } else if (filename.endsWith(".osm")) {
+            this.baseFilename = filename.substring(0, filename.lastIndexOf('.'));
+            // First pass - identify required nodes
+            requiredNodes = identifyRequiredNodes(filename);
+            // Second pass - parse with filtering
             parseOSM(filename);
         } else if (filename.isEmpty() || filename.endsWith(".pbf")) {
             parsePBF(filename);
@@ -125,7 +147,119 @@ public class Model implements Serializable {
             parseTXT(filename);
         }
 
-         save(filename + ".obj");
+        save(filename + ".obj");
+    }
+
+    // OPTIMIZED: New pre-processing method to identify required nodes
+    private Set<Long> identifyRequiredNodes(String filename) throws XMLStreamException, IOException {
+        System.out.println("=== PRE-PROCESSING PASS: Identifying required nodes ===");
+        long startTime = System.currentTimeMillis();
+
+        Set<Long> required = new HashSet<>();
+        Map<Long, Integer> nodeUsageCount = new HashMap<>();
+
+        InputStream inputStream;
+        if (filename.endsWith(".zip")) {
+            var zipInput = new ZipInputStream(new FileInputStream(filename));
+            zipInput.getNextEntry();
+            inputStream = zipInput;
+        } else {
+            inputStream = new FileInputStream(filename);
+        }
+
+        var input = XMLInputFactory.newInstance().createXMLStreamReader(new InputStreamReader(inputStream));
+
+        long currentNodeId = -1;
+        boolean inNode = false;
+        boolean hasAddress = false;
+        int nodeCount = 0;
+        int wayCount = 0;
+        int orphanNodes = 0;
+
+        while (input.hasNext()) {
+            var tagKind = input.next();
+            if (tagKind == XMLStreamConstants.START_ELEMENT) {
+                var name = input.getLocalName();
+
+                if (name.equals("node")) {
+                    nodeCount++;
+                    currentNodeId = Long.parseLong(input.getAttributeValue(null, "id"));
+                    inNode = true;
+                    hasAddress = false;
+                } else if (name.equals("way")) {
+                    wayCount++;
+                    inNode = false;
+                } else if (name.equals("nd")) {
+                    // This is a node reference in a way - we need ALL of these
+                    long ref = Long.parseLong(input.getAttributeValue(null, "ref"));
+                    nodeUsageCount.merge(ref, 1, Integer::sum);
+                    required.add(ref); // ALL nodes in ways are required for geometry
+                } else if (name.equals("tag") && inNode) {
+                    // Check if this node has an address
+                    String k = input.getAttributeValue(null, "k");
+                    if (k != null && k.startsWith("addr:")) {
+                        hasAddress = true;
+                        required.add(currentNodeId);
+                    }
+                } else if (name.equals("member")) {
+                    // Also check for nodes referenced in relations
+                    String type = input.getAttributeValue(null, "type");
+                    if ("node".equals(type)) {
+                        long ref = Long.parseLong(input.getAttributeValue(null, "ref"));
+                        required.add(ref);
+                    }
+                }
+            } else if (tagKind == XMLStreamConstants.END_ELEMENT) {
+                if (input.getLocalName().equals("node")) {
+                    inNode = false;
+                    if (hasAddress) {
+                        required.add(currentNodeId);
+                    }
+                }
+            }
+        }
+
+        // Identify intersection nodes (used by 2+ ways)
+        for (Map.Entry<Long, Integer> entry : nodeUsageCount.entrySet()) {
+            if (entry.getValue() >= 2) {
+                intersectionNodes.add(entry.getKey());
+            }
+        }
+
+        orphanNodes = nodeCount - required.size();
+
+        input.close();
+        inputStream.close();
+
+        long endTime = System.currentTimeMillis();
+        System.out.println("Pre-processing complete in " + (endTime - startTime) + "ms:");
+        System.out.println("  - Total nodes in file: " + nodeCount);
+        System.out.println("  - Total ways in file: " + wayCount);
+        System.out.println("  - Required nodes: " + required.size() + " (" +
+                String.format("%.1f%%", 100.0 * required.size() / nodeCount) + ")");
+        System.out.println("  - Orphan nodes (not used): " + orphanNodes);
+        System.out.println("  - Intersection nodes: " + intersectionNodes.size());
+        System.out.println("  - Memory saved by filtering orphans: ~" +
+                (orphanNodes * 50 / 1024 / 1024) + "MB");
+        System.out.println("  NOTE: We keep all nodes referenced by ways to maintain geometry");
+
+        return required;
+    }
+
+    // Helper method to skip XML elements
+    private void skipToEndElement(XMLStreamReader reader, String elementName) throws XMLStreamException {
+        int depth = 1;
+        while (reader.hasNext() && depth > 0) {
+            int event = reader.next();
+            if (event == XMLStreamConstants.START_ELEMENT) {
+                depth++;
+            } else if (event == XMLStreamConstants.END_ELEMENT) {
+                depth--;
+                if (depth == 0 && reader.getLocalName().equals(elementName)) {
+                    return;
+                }
+            }
+        }
     }
 
     void save(String filename) throws FileNotFoundException, IOException {
@@ -137,30 +271,28 @@ public class Model implements Serializable {
     private void parsePBF(String filename) throws IOException, XMLStreamException, FactoryConfigurationError, ClassNotFoundException {
         OsmPbfToOsmConverter converter = new OsmPbfToOsmConverter(filename);
         converter.convert();
-        // Store base filename before parsing
         this.baseFilename = filename.substring(0, filename.lastIndexOf('.'));
         parseOSM(converter.getOutputFile());
     }
 
     private void parseZIP(String filename) throws IOException, XMLStreamException, FactoryConfigurationError {
-        // Store base filename before parsing
-        this.baseFilename = filename.substring(0, filename.length() - 8);  // Remove .osm.zip
         var input = new ZipInputStream(new FileInputStream(filename));
         input.getNextEntry();
         parseOSM(input);
     }
 
     private void parseOSM(String filename) throws FileNotFoundException, XMLStreamException, FactoryConfigurationError {
-        // Store base filename before parsing
-        this.baseFilename = filename.substring(0, filename.lastIndexOf('.'));
         parseOSM(new FileInputStream(filename));
     }
 
-
-
     private void parseOSM(InputStream inputStream) throws FileNotFoundException, XMLStreamException, FactoryConfigurationError {
-        System.out.println("=== STARTING OSM PARSING WITH DEBUG MODE ===");
+        System.out.println("=== STARTING OSM PARSING WITH MEMORY OPTIMIZATION ===");
         long startTime = System.currentTimeMillis();
+
+        // OPTIMIZED: Initialize sorted nodes with exact capacity
+        if (sortedNodes == null) {
+            sortedNodes = new SortedNodeList(requiredNodes.size());
+        }
 
         var input = XMLInputFactory.newInstance().createXMLStreamReader(new InputStreamReader(inputStream));
 
@@ -172,7 +304,6 @@ public class Model implements Serializable {
                 "corridor", "elevator", "escalator", "steps", "bus_guideway",
                 "busway", "services", "rest_area", "escape", "emergency_access"
         );
-        Map<String, Integer> completelySkipped = new HashMap<>();
 
         //All ways who might be in an relation later are stored here before added to the arraylist of ways
         Map<String, HashMap<Long, Way>> potentialRelationWays = new HashMap<>();
@@ -193,44 +324,36 @@ public class Model implements Serializable {
         boolean isRoad = false;
         String roadType = null;
         boolean isOneWay = false;
-        boolean bicycleAllowed = true;  // Default to true for most roads
-        boolean carAllowed = true;      // Default to true for most roads
+        boolean bicycleAllowed = true;
+        boolean carAllowed = true;
         int speedLimit = 50;
-
-        //used for dijikstra
 
         String wayName = "Unknown road";
 
-        //might delete in restructure
-        var coast = false;
-        var highway = false;
         long currentNodeId = -1;
         Map<String, String> currentTags = new HashMap<>();
         boolean isAddressNode = false;
-        String highWayType = null;
-        String landuseType = null;
-        String natrualType = null; // Combined variable for natural types
         boolean inRelation = false;
         long currentRelationId = -1;
         long currentWayId = -1;
-        boolean skipCurrentWay = false;  // Flag to skip entire way
+        boolean skipCurrentWay = false;
 
-        // For filtering routes - just a flag, no collection
         boolean skipRelation = false;
-        boolean isNaturalFeature = false; // Flag to prioritize natural features
+        boolean isNaturalFeature = false;
 
-        // For address parsing
         Map<Long, Map<String, String>> nodeAddressTags = new HashMap<>();
         boolean inNode = false;
         boolean processingAddressNode = false;
 
-        // DEBUG: Progress tracking
+        // Progress tracking
         int nodeCount = 0;
+        int nodesSkipped = 0;
         int wayCount = 0;
         int relationCount = 0;
         long lastProgressTime = System.currentTimeMillis();
+        long lastMemoryCheck = System.currentTimeMillis();
 
-        System.out.println("Starting XML parsing...");
+        System.out.println("Starting XML parsing with " + requiredNodes.size() + " required nodes...");
 
         while (input.hasNext()) {
             var tagKind = input.next();
@@ -243,72 +366,75 @@ public class Model implements Serializable {
                     minlon = (float) Double.parseDouble(input.getAttributeValue(null, "minlon"));
                     maxlon = (float) Double.parseDouble(input.getAttributeValue(null, "maxlon"));
                     System.out.println("Bounds: lat[" + minlat + " to " + maxlat + "], lon[" + minlon + " to " + maxlon + "]");
+
                 } else if (name.equals("node")) {
                     nodeCount++;
+
+                    var id = Long.parseLong(input.getAttributeValue(null, "id"));
+
+                    // OPTIMIZED: Skip non-required nodes
+                    if (!requiredNodes.contains(id)) {
+                        nodesSkipped++;
+                        skipToEndElement(input, "node");
+                        continue;
+                    }
 
                     // Progress reporting for nodes
                     if (nodeCount % 1000000 == 0) {
                         long currentTime = System.currentTimeMillis();
-                        System.out.println("Processed " + nodeCount + " nodes in " +
+                        System.out.println("Processed " + nodeCount + " nodes (" + nodesSkipped + " skipped) in " +
                                 (currentTime - lastProgressTime) + "ms");
                         lastProgressTime = currentTime;
+                    }
 
-                        // Memory check
-                        Runtime rt = Runtime.getRuntime();
-                        long usedMB = (rt.totalMemory() - rt.freeMemory()) / 1024 / 1024;
-                        System.out.println("Memory usage: " + usedMB + "MB");
+                    // OPTIMIZED: Memory check every 30 seconds
+                    if (System.currentTimeMillis() - lastMemoryCheck > 30000) {
+                        checkAndManageMemory();
+                        lastMemoryCheck = System.currentTimeMillis();
                     }
 
                     inNode = true;
-                    var id = Long.parseLong(input.getAttributeValue(null, "id"));
                     var lat = Double.parseDouble(input.getAttributeValue(null, "lat"));
                     var lon = Double.parseDouble(input.getAttributeValue(null, "lon"));
                     Node node = new Node(id, (float) -lat, (float) (0.56 * lon));
-                    id2node.put(node);
+
+                    // OPTIMIZED: Use sorted node list
+                    sortedNodes.add(node);
+
                     if (graphBuilder != null) {
                         graphBuilder.storeNodeCoordinates(id, (float) (0.56 * lon), (float) -lat);
                     }
-                    // Check if this node has address tags
+
                     currentNodeId = id;
                     currentTags.clear();
                     isAddressNode = false;
-
-                    // Setup for address parsing
-                    currentNodeId = id;
                     processingAddressNode = false;
 
                 } else if (name.equals("way")) {
                     wayCount++;
 
-                    // Progress reporting for ways
-                    if (wayCount % 500000 == 0) {
+                    // Progress reporting and memory management for ways
+                    if (wayCount % 100000 == 0) {
                         long currentTime = System.currentTimeMillis();
                         System.out.println("Processed " + wayCount + " ways in " +
                                 (currentTime - lastProgressTime) + "ms");
                         lastProgressTime = currentTime;
 
-                        // Memory check
-                        Runtime rt = Runtime.getRuntime();
-                        long usedMB = (rt.totalMemory() - rt.freeMemory()) / 1024 / 1024;
-                        System.out.println("Memory usage: " + usedMB + "MB");
-
-                        if (usedMB > 2000) { // If using more than 2GB
-                            System.gc();
-                            System.out.println("Triggered garbage collection");
-                        }
+                        // OPTIMIZED: Aggressive memory management
+                        checkAndManageMemory();
                     }
-                    skipCurrentWay = false;
 
+                    skipCurrentWay = false;
                     type = "unknown";
                     isOneWay = false;
                     road = false;
                     inNode = false;
                     wayNodes.clear();
                     relID = Long.parseLong(input.getAttributeValue(null, "id"));
+
                 } else if (name.equals("relation")) {
                     relationCount++;
 
-                    // Progress reporting for relations
                     if (relationCount % 10000 == 0) {
                         System.out.println("Processed " + relationCount + " relations");
                     }
@@ -326,7 +452,7 @@ public class Model implements Serializable {
                     var v = internIfNotNull(input.getAttributeValue(null, "v"));
 
                     if (skipCurrentWay) {
-                        continue;  // Skip processing this tag
+                        continue;
                     }
 
                     if (k.equals("building")) {
@@ -591,7 +717,7 @@ public class Model implements Serializable {
                             }
                         }
 
-// Also check for explicit bicycle access tags
+                        // Also check for explicit bicycle access tags
                         if (k.equals("bicycle")) {
                             switch (v) {
                                 case "yes":
@@ -610,7 +736,7 @@ public class Model implements Serializable {
                             }
                         }
 
-// Check for motor vehicle access
+                        // Check for motor vehicle access
                         if (k.equals("motor_vehicle") || k.equals("motorcar")) {
                             switch (v) {
                                 case "yes":
@@ -622,10 +748,9 @@ public class Model implements Serializable {
                             }
                         }
 
-
                         if (k.equals("maxspeed")) {
                             try {
-                                speedLimit = Integer.parseInt(input.getAttributeValue(null, "value"));
+                                speedLimit = Integer.parseInt(v);
                             } catch (NumberFormatException e) {
                                 //if its not an number dont handle
                             }
@@ -712,14 +837,19 @@ public class Model implements Serializable {
                             }
                         }
                     }
+
                 } else if (name.equals("nd")) {
                     if (!skipCurrentWay) {
                         var ref = Long.parseLong(input.getAttributeValue(null, "ref"));
-                        var node = id2node.get(ref);
-                        wayNodes.add(node);
+                        // OPTIMIZED: Use sorted node list
+                        var node = sortedNodes.get(ref);
+                        if (node != null) {
+                            wayNodes.add(node);
+                        }
                     }
 
                 } else if (name.equals("member")) {
+                    // [Member processing remains the same]
                     var ref = Long.parseLong(input.getAttributeValue(null, "ref"));
                     var elm = id2way.get(ref);
                     if (elm != null) {
@@ -735,12 +865,12 @@ public class Model implements Serializable {
             } else if (tagKind == XMLStreamConstants.END_ELEMENT) {
                 var name = input.getLocalName();
                 if (name.equals("node")) {
-                    // If we've processed an address node, build the address and add to the trie
                     if (processingAddressNode) {
                         createAndAddAddress(currentNodeId, nodeAddressTags.get(currentNodeId));
                     }
                     inNode = false;
                     processingAddressNode = false;
+
                 } else if (name.equals("relation")) {
                     // Natural features override the skip flag
                     if (isNaturalFeature) {
@@ -781,53 +911,66 @@ public class Model implements Serializable {
                     }
 
                     inRelation = false;
-                } else if (name.equals("way")) {
-                    // var name = input.getLocalName();
 
-                    if (name.equals("way")) {
-                        // CHECK SKIP FLAG BEFORE CREATING WAY
-                        if (skipCurrentWay) {
-                            // Don't create Way object, just clear and continue
-                            wayNodes.clear();
-                            nonRoadWaysProcessed++;  // Still count it
-                            continue;  // Skip to next element
+                } else if (name.equals("way")) {
+                    // CHECK SKIP FLAG BEFORE CREATING WAY
+                    if (skipCurrentWay) {
+                        // Don't create Way object, just clear and continue
+                        wayNodes.clear();
+                        nonRoadWaysProcessed++;  // Still count it
+                        continue;  // Skip to next element
+                    }
+
+                    // Only create Way if not skipping AND has nodes
+                    if (!wayNodes.isEmpty()) {
+                        Way way = new Way(wayNodes, type);
+
+                        // Debug logging
+                        if (wayCount <= 10 || wayCount % 10000 == 0) {
+                            System.out.println("Processing way " + wayCount + ": type=" + type +
+                                    ", nodes=" + wayNodes.size() + ", road=" + road);
                         }
 
-                        // Only create Way if not skipping AND has nodes
-                        if (!wayNodes.isEmpty()) {
-                            Way way = new Way(wayNodes, type);
+                        // Add to appropriate collections
+                        if (potentialRelationWays.keySet().contains(type)) {
+                            potentialRelationWays.get(type).put(relID, way);
+                            id2way.put(relID, way);
+                        } else if (road && buildGraphDuringParsing && graphBuilder != null) {
+                            // Process for routing
+                            List<Long> nodeIds = new ArrayList<>(wayNodes.size());
+                            for (Node node : wayNodes) {
+                                nodeIds.add(node.getId());
+                            }
 
-                            // Add to appropriate collections
-                            if (potentialRelationWays.keySet().contains(type)) {
-                                potentialRelationWays.get(type).put(relID, way);
-                                id2way.put(relID, way);
-                            } else if (road && buildGraphDuringParsing && graphBuilder != null) {
-                                // Process for routing
-                                List<Long> nodeIds = new ArrayList<>(wayNodes.size());
-                                for (Node node : wayNodes) {
-                                    nodeIds.add(node.getId());
-                                }
+                            // IMPORTANT: Store the full way data for edge building
+                            graphBuilder.addRoadWithNodeIds(way, nodeIds, type, isOneWay,
+                                    wayName, speedLimit, bicycleAllowed, carAllowed);
 
-                                graphBuilder.addRoadWithNodeIds(way, nodeIds, type, isOneWay,
-                                        wayName, speedLimit, bicycleAllowed, carAllowed);
+                            roadWaysProcessed++;
 
-                                // Also add to typeWays for rendering roads
-                                if (!typeWays.containsKey(type)) {
-                                    typeWays.put(type, new ArrayList<>());
-                                }
-                                typeWays.get(type).add(way);
-                            } else {
-                                // Non-road way - add to typeWays for rendering
-                                if (!typeWays.containsKey(type)) {
-                                    typeWays.put(type, new ArrayList<>());
-                                }
-                                typeWays.get(type).add(way);
+                            // Also add to typeWays for rendering roads
+                            if (!typeWays.containsKey(type)) {
+                                typeWays.put(type, new ArrayList<>());
+                            }
+                            typeWays.get(type).add(way);
+                        } else {
+                            // Non-road way - add to typeWays for rendering
+                            if (!typeWays.containsKey(type)) {
+                                typeWays.put(type, new ArrayList<>());
+                            }
+                            typeWays.get(type).add(way);
+
+                            // Debug: track what types we're adding
+                            if (typeWays.get(type).size() == 1) {
+                                System.out.println("First way of type '" + type + "' added");
                             }
                         }
-
-                        // Clear for next way
-                        wayNodes.clear();
+                    } else {
+                        System.out.println("WARNING: Way " + wayCount + " has no nodes!");
                     }
+
+                    // Clear for next way
+                    wayNodes.clear();
                 }
             }
         }
@@ -835,12 +978,13 @@ public class Model implements Serializable {
         long parseTime = System.currentTimeMillis();
         System.out.println("=== OSM PARSING COMPLETE ===");
         System.out.println("Parsed in " + (parseTime - startTime) + "ms:");
-        System.out.println("- " + nodeCount + " nodes");
+        System.out.println("- " + nodeCount + " nodes processed (" + nodesSkipped + " skipped)");
         System.out.println("- " + wayCount + " ways");
         System.out.println("- " + relationCount + " relations");
         System.out.println("- " + roadWaysProcessed + " roads");
+        System.out.println("Memory saved by node filtering: ~" + (nodesSkipped * 50 / 1024 / 1024) + "MB");
 
-        // NEW: After parsing all ways, build the intersection-based graph
+        // Build graph if enabled
         if (buildGraphDuringParsing && graphBuilder != null) {
             System.out.println("=== STARTING GRAPH CONSTRUCTION ===");
             long graphStartTime = System.currentTimeMillis();
@@ -852,11 +996,11 @@ public class Model implements Serializable {
             System.out.println("Graph built in " + (graphEndTime - graphStartTime) + "ms");
             System.out.println("Final graph: " + graphBuilder.getVertexCount() + " vertices, " + tempGraph.E() + " edges");
 
-            // Save graph to file and immediately discard from memory
+            // Save graph to file
             try {
-                fileBasedGraph.saveGraph(tempGraph, graphBuilder, baseFilename);  // Use the stored baseFilename
-                tempGraph = null;  // Clear immediately
-                graphBuilder = null;  // Also clear GraphBuilder
+                fileBasedGraph.saveGraph(tempGraph, graphBuilder, baseFilename);
+                tempGraph = null;
+                graphBuilder = null;
                 System.gc();
                 System.out.println("Graph saved to: " + baseFilename + ".graph");
             } catch (IOException e) {
@@ -864,7 +1008,7 @@ public class Model implements Serializable {
             }
         }
 
-        // Continue with rest of processing...
+        // Process unused relation ways
         for (String featureType : potentialRelationWays.keySet()) {
             HashMap<Long, Way> unusedWays = potentialRelationWays.get(featureType);
             if (unusedWays != null && !unusedWays.isEmpty()) {
@@ -874,12 +1018,11 @@ public class Model implements Serializable {
                     typeWays.put(featureType, new ArrayList<>());
                 }
 
-                // Add all the unused ways to typeWays
                 typeWays.get(featureType).addAll(unusedWays.values());
             }
         }
 
-        // Process KDTree, clean up and report statistics
+        // Build KD-tree
         System.out.println("Building KD-tree for spatial queries...");
         for (String featureType : typeWays.keySet()) {
             ArrayList<Way> typeWaysList = typeWays.get(featureType);
@@ -890,10 +1033,9 @@ public class Model implements Serializable {
             }
         }
 
-        System.out.println("Cleaning up temporary data...");
-        id2node.clear();
-        ways = null;
-        System.gc();
+        // OPTIMIZED: Final cleanup
+        System.out.println("Performing final cleanup...");
+        performFinalCleanup();
 
         // Report statistics
         int totalWays = 0;
@@ -915,7 +1057,59 @@ public class Model implements Serializable {
             }
         }
 
+        // Final memory report
+        Runtime rt = Runtime.getRuntime();
+        long usedMB = (rt.totalMemory() - rt.freeMemory()) / 1024 / 1024;
+        System.out.println("Final memory usage: " + usedMB + "MB");
         System.out.println("=== OSM PROCESSING COMPLETE ===");
+    }
+
+    // OPTIMIZED: Memory management method
+    private void checkAndManageMemory() {
+        Runtime rt = Runtime.getRuntime();
+        long usedMB = (rt.totalMemory() - rt.freeMemory()) / 1024 / 1024;
+        long maxMB = rt.maxMemory() / 1024 / 1024;
+
+        System.out.println("Memory usage: " + usedMB + "MB / " + maxMB + "MB (" +
+                String.format("%.1f%%", 100.0 * usedMB / maxMB) + ")");
+
+        if (usedMB > maxMB * 0.7) { // If using more than 70% of max memory
+            System.out.println("High memory usage detected, triggering cleanup...");
+
+            // Compact sorted nodes if possible
+            if (sortedNodes != null) {
+                sortedNodes.compact();
+            }
+
+            System.gc();
+
+            // Check memory again
+            usedMB = (rt.totalMemory() - rt.freeMemory()) / 1024 / 1024;
+            System.out.println("Memory after GC: " + usedMB + "MB");
+        }
+    }
+
+    // OPTIMIZED: Final cleanup method
+    private void performFinalCleanup() {
+        // Clear pre-processing data structures
+        if (requiredNodes != null) {
+            requiredNodes.clear();
+            requiredNodes = null;
+        }
+        if (intersectionNodes != null) {
+            intersectionNodes.clear();
+            intersectionNodes = null;
+        }
+
+        // Compact sorted nodes
+        if (sortedNodes != null) {
+            sortedNodes.compact();
+        }
+
+        // Clear temporary data
+        ways = null;
+
+        System.gc();
     }
 
     private void createAndAddAddress(long nodeId, Map<String, String> addressTags) {
@@ -923,26 +1117,22 @@ public class Model implements Serializable {
             return;
         }
 
-        // Get required address components
         String street = addressTags.get("street");
         String house = addressTags.get("housenumber");
         String city = addressTags.getOrDefault("city", internIfNotNull(addressTags.get("place")));
         city = internIfNotNull(city);
 
-        // Check if we have the minimum required information
         if (street == null && city == null) {
             return;
         }
 
-        // Build the address
         OSMAddress.Builder builder = new OSMAddress.Builder()
                 .street(street)
                 .house(house)
                 .postcode(addressTags.get("postcode"))
                 .city(city)
-                .nodeId(nodeId);  // Store the node ID instead of the Node object
+                .nodeId(nodeId);
 
-        // Add optional components if available
         if (addressTags.containsKey("floor")) {
             builder.floor(addressTags.get("floor"));
         }
@@ -951,11 +1141,17 @@ public class Model implements Serializable {
             builder.side(addressTags.get("unit"));
         }
 
-        // Build and add to trie
         OSMAddress address = builder.build();
         addressHandler.addAddress(address);
-    }
 
+        // Store coordinates for address nodes
+        if (sortedNodes != null) {
+            Node node = sortedNodes.get(nodeId);
+            if (node != null) {
+                addressNodeCoordinates.put(nodeId, new float[]{node.lon, node.lat});
+            }
+        }
+    }
 
     private void parseTXT(String filename) throws FileNotFoundException, IOException {
         var f = new File(filename);
@@ -966,30 +1162,23 @@ public class Model implements Serializable {
             }
         }
     }
-    //KD tree method
+
     public void add(Point2D p1, Point2D p2) {
         list.add(new Line(p1, p2));
     }
-    //Creating graph methods
+
     public EdgeWeightedDigraph buildRoadGraph() {
-        // This method is no longer used but kept for compatibility
         System.out.println("buildRoadGraph() called but using file-based storage");
         return null;
     }
 
-    /**
-     * Access graph builder
-     */
     public GraphBuilder getGraphBuilder() {
         if (graphBuilder == null) {
-            buildRoadGraph(); // Ensure graph is built
+            buildRoadGraph();
         }
         return graphBuilder;
     }
 
-    /**
-     * Get road graph with segment handling
-     */
     public EdgeWeightedDigraph getRoadGraph() {
         throw new UnsupportedOperationException(
                 "In-memory graph not available. Use getFileBasedGraph() for routing."
@@ -1001,18 +1190,37 @@ public class Model implements Serializable {
     }
 
     public int findNearestVertex(float x, float y) {
-        // Use file-based graph if available
+        // First check if we have a file-based graph
         if (fileBasedGraph != null && fileBasedGraph.graphFileExists()) {
-            return fileBasedGraph.findNearestVertex(x, y);
+            int vertex = fileBasedGraph.findNearestVertex(x, y);
+
+            // If file-based graph returns -1 or an invalid vertex, try fallback
+            if (vertex < 0) {
+                System.err.println("WARNING: FileBasedGraph couldn't find nearest vertex for coordinates [" + x + ", " + y + "]");
+                // Try to find from stored coordinates during parsing
+                return findNearestVertexFromStoredCoords(x, y);
+            }
+
+            return vertex;
         }
 
-        // Fallback error
         System.err.println("ERROR: No graph available for finding nearest vertex");
         return -1;
-
     }
 
-    // Address-related methods
+    // Add fallback method to find nearest vertex from stored coordinates
+    private int findNearestVertexFromStoredCoords(float x, float y) {
+        if (graphBuilder != null) {
+            // During parsing, use GraphBuilder's vertex coordinates
+            return graphBuilder.findNearestVertex(x, y);
+        }
+
+        // After loading from file, we need to reconstruct this information
+        // This is a limitation of the current approach
+        System.err.println("ERROR: Cannot find nearest vertex - GraphBuilder not available");
+        return -1;
+    }
+
     public AddressHandler getAddressHandler() {
         return addressHandler;
     }
@@ -1021,10 +1229,9 @@ public class Model implements Serializable {
         return value != null ? value.intern() : null;
     }
 
-
     public void printid2NodeSortCount() {
-        System.out.println("HOW OFTEN IS id2NODE SORTED -------------------------------");
-        System.out.println(id2node.getSortCount());
+        // No longer applicable with SortedNodeList
+        System.out.println("Using optimized SortedNodeList");
     }
 
     public int addressHandlerSize() {
@@ -1038,24 +1245,20 @@ public class Model implements Serializable {
     public float[] getNodeCoordinates(long nodeId) {
         System.out.println("DEBUG: Getting coordinates for node ID " + nodeId);
 
-        // Check address node coordinates first (these survive serialization)
         float[] coords = addressNodeCoordinates.get(nodeId);
         if (coords != null) {
             System.out.println("DEBUG: Found address node coordinates: [" + coords[0] + ", " + coords[1] + "]");
             return coords;
         }
 
-        // If not an address node, it might be a graph vertex
         if (fileBasedGraph != null) {
-            // Check if this node is a vertex in the graph
-            // Note: We'd need to add a nodeId->vertex mapping in FileBasedGraph for this
-            // For now, we can't look up by nodeId in the graph
             System.out.println("DEBUG: Node " + nodeId + " not found in address coordinates");
         }
 
         System.out.println("DEBUG: No coordinates found for node " + nodeId);
         return null;
     }
+
     public void printProcessingStats() {
         System.out.println("\n=== FINAL PROCESSING STATISTICS ===");
         System.out.println("Roads processed for graph: " + roadWaysProcessed);
@@ -1065,14 +1268,22 @@ public class Model implements Serializable {
                 String.format("%.1f%%", 100.0 * roadWaysProcessed / (roadWaysProcessed + nonRoadWaysProcessed)));
         System.out.println("=====================================");
     }
-    // Add setter
+
     public void setTransportMode(TransportMode mode) {
         this.currentTransportMode = mode;
     }
 
-    // Add getter
     public TransportMode getTransportMode() {
         return currentTransportMode;
     }
 
+    public Set<Long> getIntersectionNodes() {
+        return intersectionNodes != null ? intersectionNodes : new HashSet<>();
+    }
+
+    // Also add this to help GraphBuilder
+    public boolean isIntersectionNode(long nodeId) {
+        return intersectionNodes != null && intersectionNodes.contains(nodeId);
+    }
 }
+

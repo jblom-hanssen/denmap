@@ -25,6 +25,7 @@ public class FileBasedGraph implements Serializable {
         this.vertexCount = graph.V();
 
         System.out.println("Saving graph to file: " + graphFilePath);
+        System.out.println("Graph has " + graph.V() + " vertices and " + graph.E() + " edges");
         long startTime = System.currentTimeMillis();
 
         try (RandomAccessFile file = new RandomAccessFile(graphFilePath, "rw")) {
@@ -32,16 +33,28 @@ public class FileBasedGraph implements Serializable {
             file.writeInt(graph.V()); // number of vertices
             file.writeInt(graph.E()); // number of edges
 
-            // Write vertex data
+            // First, write all vertex coordinates
+            System.out.println("Writing vertex coordinates...");
+            for (int v = 0; v < graph.V(); v++) {
+                float[] coords = builder.getCoordinatesForVertex(v);
+                if (coords != null) {
+                    file.writeBoolean(true); // Has coordinates
+                    file.writeFloat(coords[0]);
+                    file.writeFloat(coords[1]);
+                    // Store in memory map
+                    vertexCoordinates.put(v, coords);
+                } else {
+                    file.writeBoolean(false); // No coordinates
+                    System.err.println("WARNING: Vertex " + v + " has no coordinates!");
+                }
+            }
+
+            // Then write adjacency lists
+            System.out.println("Writing adjacency lists...");
+            int edgesWritten = 0;
             for (int v = 0; v < graph.V(); v++) {
                 // Store file position for this vertex
                 vertexFilePositions.put(v, file.getFilePointer());
-
-                // Store coordinates in memory (small enough to keep)
-                float[] coords = builder.getCoordinatesForVertex(v);
-                if (coords != null) {
-                    vertexCoordinates.put(v, coords);
-                }
 
                 // Count edges for this vertex
                 int edgeCount = 0;
@@ -56,12 +69,16 @@ public class FileBasedGraph implements Serializable {
                 for (DirectedEdge e : graph.adj(v)) {
                     file.writeInt(e.to());
                     file.writeFloat(e.weight());
+                    edgesWritten++;
                 }
 
-                if (v % 100000 == 0) {
-                    System.out.println("Saved " + v + "/" + graph.V() + " vertices");
+                if (v % 10000 == 0) {
+                    System.out.println("Saved " + v + "/" + graph.V() + " vertices, " +
+                            edgesWritten + " edges so far");
                 }
             }
+
+            System.out.println("Total edges written: " + edgesWritten);
         }
 
         long endTime = System.currentTimeMillis();
@@ -75,9 +92,35 @@ public class FileBasedGraph implements Serializable {
     public void openForReading() throws IOException {
         if (graphFile == null && graphFilePath != null) {
             graphFile = new RandomAccessFile(graphFilePath, "r");
-            // Skip header
-            graphFile.readInt(); // vertices
-            graphFile.readInt(); // edges
+
+            // Read header
+            int vertices = graphFile.readInt();
+            int edges = graphFile.readInt();
+
+            // Read vertex coordinates
+            for (int v = 0; v < vertices; v++) {
+                boolean hasCoords = graphFile.readBoolean();
+                if (hasCoords) {
+                    float x = graphFile.readFloat();
+                    float y = graphFile.readFloat();
+                    vertexCoordinates.put(v, new float[]{x, y});
+                }
+            }
+
+            // The file pointer is now at the start of adjacency lists
+            // Store this position
+            long adjListStart = graphFile.getFilePointer();
+
+            // We need to rebuild vertexFilePositions by scanning through
+            // This is necessary for getAdjacentEdges to work
+            for (int v = 0; v < vertices; v++) {
+                vertexFilePositions.put(v, graphFile.getFilePointer());
+                int edgeCount = graphFile.readInt();
+                // Skip the edges (each edge is an int + float = 8 bytes)
+                graphFile.skipBytes(edgeCount * 8);
+            }
+
+            System.out.println("Opened graph file with " + vertices + " vertices and " + edges + " edges");
         }
     }
 

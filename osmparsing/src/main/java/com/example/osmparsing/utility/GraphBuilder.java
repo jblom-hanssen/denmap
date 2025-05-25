@@ -34,18 +34,18 @@ public class GraphBuilder implements Serializable {
 
     // Inner class to store road data for second pass
     private static class RoadData implements Serializable {
-        Way way;
+        Way way;  // ADD THIS - Store reference to the Way object
         List<Long> nodeIds;
         String roadType;
         boolean isOneWay;
-        RoadProperties properties; // ADD THIS
+        RoadProperties properties;
 
         RoadData(Way way, List<Long> nodeIds, String roadType, boolean isOneWay, RoadProperties properties) {
-            this.way = way;
+            this.way = way;  // ADD THIS
             this.nodeIds = nodeIds;
             this.roadType = roadType;
             this.isOneWay = isOneWay;
-            this.properties = properties; // ADD THIS
+            this.properties = properties;
         }
     }
 
@@ -69,7 +69,7 @@ public class GraphBuilder implements Serializable {
      * First pass: Store road data and count node usage
      */
     public void addRoadWithNodeIds(Way way, List<Long> nodeIds, String roadType, boolean isOneWay,
-                                   String wayName, int speedLimit, boolean bicycleAllowed, boolean carAllowed) { // ADD PARAMETERS
+                                   String wayName, int speedLimit, boolean bicycleAllowed, boolean carAllowed) {
         if (!isImportantRoad(roadType) || nodeIds.size() < 2) {
             return;
         }
@@ -78,15 +78,41 @@ public class GraphBuilder implements Serializable {
         RoadProperties properties = new RoadProperties(wayName, roadType, speedLimit,
                 isOneWay, bicycleAllowed, carAllowed);
 
-        // Store road data for second pass
+        // Store road data for second pass - INCLUDE THE WAY OBJECT
         roadDataList.add(new RoadData(way, new ArrayList<>(nodeIds), roadType, isOneWay, properties));
 
         // Count node usage
         for (long nodeId : nodeIds) {
             nodeUsageCount.merge(nodeId, 1, Integer::sum);
         }
+
+        // Debug logging
+        if (roadDataList.size() <= 5 || roadDataList.size() % 1000 == 0) {
+            System.out.println("Added road #" + roadDataList.size() + ": " + roadType +
+                    " with " + nodeIds.size() + " nodes");
+        }
+    }
+    private void createVertexIfNeeded(long nodeId, Way way, int nodeIndex) {
+        if (!nodeToVertex.containsKey(nodeId)) {
+            float[] coords = getNodeCoordinates(nodeId, way, nodeIndex);
+            if (coords != null) {
+                createVertex(nodeId, coords[0], coords[1]);
+            }
+        }
     }
 
+    private float[] getNodeCoordinates(long nodeId, Way way, int nodeIndex) {
+        // Try to get from way first
+        if (way != null && nodeIndex >= 0) {
+            float[] wayCoords = way.getCoords();
+            if (nodeIndex * 2 + 1 < wayCoords.length) {
+                return new float[]{wayCoords[nodeIndex * 2], wayCoords[nodeIndex * 2 + 1]};
+            }
+        }
+
+        // Fallback to stored coordinates
+        return nodeCoordinateCache.get(nodeId);
+    }
     /**
      * Finalize graph construction using collected data
      */
@@ -142,96 +168,72 @@ public class GraphBuilder implements Serializable {
 
         System.out.println("Analyzing " + roadDataList.size() + " roads...");
 
-        // First, cache all coordinates
-        for (RoadData road : roadDataList) {
-            if (road.way != null) {
-                float[] coords = road.way.getCoords();
-                for (int i = 0; i < road.nodeIds.size() && i * 2 + 1 < coords.length; i++) {
-                    nodeCoordinateCache.put(road.nodeIds.get(i),
-                            new float[]{coords[i * 2], coords[i * 2 + 1]});
-                }
-            }
-        }
+        // Get pre-identified intersection nodes from Model
+        Set<Long> modelIntersections = model.getIntersectionNodes();
+        System.out.println("Using " + modelIntersections.size() + " pre-identified intersection nodes");
 
-        // Analyze node connections to find TRUE intersections
-        Map<Long, Set<String>> nodeRoadTypes = new HashMap<>();
+        // Create vertices for all intersection nodes that appear in our roads
+        Set<Long> usedIntersections = new HashSet<>();
 
         for (RoadData road : roadDataList) {
-            // For each node in the road, track what road types use it
-            for (Long nodeId : road.nodeIds) {
-                nodeRoadTypes.computeIfAbsent(nodeId, k -> new HashSet<>())
-                        .add(road.roadType);
-            }
-        }
+            if (road.nodeIds == null || road.nodeIds.isEmpty()) continue;
 
-        // Create vertices only for:
-        // 1. Nodes used by 3+ ways (definite intersection)
-        // 2. Nodes where different road types meet
-        // 3. Endpoints
-
-        Set<Long> realIntersections = new HashSet<>();
-        Set<Long> endpoints = new HashSet<>();
-
-        for (Map.Entry<Long, Integer> entry : nodeUsageCount.entrySet()) {
-            Long nodeId = entry.getKey();
-            int usage = entry.getValue();
-
-            if (usage >= 3) {
-                // 3+ ways meet here - definitely an intersection
-                realIntersections.add(nodeId);
-            } else if (usage == 2) {
-                // Check if different road types meet
-                Set<String> roadTypes = nodeRoadTypes.get(nodeId);
-                if (roadTypes != null && roadTypes.size() > 1) {
-                    // Different road types - likely an intersection
-                    realIntersections.add(nodeId);
-                }
-                // Otherwise, it's probably just a continuation point
-            }
-        }
-
-        System.out.println("Found " + realIntersections.size() + " real intersections");
-
-        // Create vertices for intersections
-        for (Long nodeId : realIntersections) {
-            float[] coords = nodeCoordinateCache.get(nodeId);
-            if (coords != null) {
-                createVertex(nodeId, coords[0], coords[1]);
-            }
-        }
-
-        // Create vertices for endpoints
-        for (RoadData road : roadDataList) {
-            if (road.nodeIds.isEmpty()) continue;
-
+            // Create vertices for first and last nodes (endpoints)
             long firstNodeId = road.nodeIds.get(0);
             long lastNodeId = road.nodeIds.get(road.nodeIds.size() - 1);
 
-            // Add endpoint if not already a vertex
-            if (!nodeToVertex.containsKey(firstNodeId)) {
-                float[] coords = nodeCoordinateCache.get(firstNodeId);
-                if (coords != null) {
-                    createVertex(firstNodeId, coords[0], coords[1]);
-                    endpoints.add(firstNodeId);
-                }
-            }
+            // Always create vertices for endpoints
+            createVertexIfNeeded(firstNodeId, road);
+            createVertexIfNeeded(lastNodeId, road);
 
-            if (!nodeToVertex.containsKey(lastNodeId)) {
-                float[] coords = nodeCoordinateCache.get(lastNodeId);
-                if (coords != null) {
-                    createVertex(lastNodeId, coords[0], coords[1]);
-                    endpoints.add(lastNodeId);
+            // Create vertices for intersection nodes along this road
+            for (Long nodeId : road.nodeIds) {
+                if (modelIntersections.contains(nodeId)) {
+                    createVertexIfNeeded(nodeId, road);
+                    usedIntersections.add(nodeId);
                 }
             }
         }
 
-        intersectionCount = realIntersections.size();
-        deadEndCount = endpoints.size();
+        intersectionCount = usedIntersections.size();
 
-        System.out.println("Created " + vertexCount + " vertices total");
-        System.out.println("(" + intersectionCount + " intersections + " + deadEndCount + " endpoints)");
+        System.out.println("Created " + vertexCount + " vertices:");
+        System.out.println("  - " + intersectionCount + " intersection vertices");
+        System.out.println("  - " + (vertexCount - intersectionCount) + " endpoint vertices");
+
+        long analysisEnd = System.currentTimeMillis();
+        System.out.println("Intersection analysis completed in " + (analysisEnd - analysisStart) + "ms");
     }
+    private void createVertexIfNeeded(long nodeId, RoadData road) {
+        if (nodeToVertex.containsKey(nodeId)) {
+            return; // Already created
+        }
 
+        // Try to get coordinates from the road's way
+        float[] coords = null;
+
+        // First try to get from nodeCoordinateCache
+        coords = nodeCoordinateCache.get(nodeId);
+
+        // If not found and we have a way, try to extract from way
+        if (coords == null && road.way != null) {
+            int nodeIndex = road.nodeIds.indexOf(nodeId);
+            if (nodeIndex >= 0) {
+                float[] wayCoords = road.way.getCoords();
+                if (nodeIndex * 2 + 1 < wayCoords.length) {
+                    coords = new float[]{wayCoords[nodeIndex * 2], wayCoords[nodeIndex * 2 + 1]};
+                    // Cache for future use
+                    nodeCoordinateCache.put(nodeId, coords);
+                }
+            }
+        }
+
+        if (coords != null) {
+            createVertex(nodeId, coords[0], coords[1]);
+        } else {
+            System.err.println("WARNING: No coordinates found for node " + nodeId);
+        }
+    }
     /**
      * Add intermediate vertices for long segments
      */
@@ -242,106 +244,163 @@ public class GraphBuilder implements Serializable {
     /**
      * Pass 2: Build edges between vertices
      */
+    /**
+     * Pass 2: Build edges between vertices
+     */
     private void buildEdges() {
         long edgeStart = System.currentTimeMillis();
         int edgeCount = 0;
-        int roadsWithVertices = 0;
-        int roadsSkipped = 0;
-        int edgeCreationFailures = 0;
+        int roadsProcessed = 0;
 
         System.out.println("Building edges from " + roadDataList.size() + " roads...");
-        System.out.println("Total vertices available: " + vertexCount);
+        System.out.println("Graph has " + graph.V() + " vertices");
 
         for (RoadData road : roadDataList) {
-            List<Integer> wayVertices = new ArrayList<>();
+            roadsProcessed++;
 
-            if (road.nodeIds == null || road.nodeIds.isEmpty()) {
-                roadsSkipped++;
+            if (road.nodeIds == null || road.nodeIds.size() < 2) {
                 continue;
             }
 
-            // Collect vertices for this way in order
-            for (long nodeId : road.nodeIds) {
+            // Debug first few roads
+            if (roadsProcessed <= 5) {
+                System.out.println("Processing road " + roadsProcessed + ": " +
+                        road.roadType + " with " + road.nodeIds.size() + " nodes");
+            }
+
+            // Create a list of vertices for this road (only intersection/endpoints)
+            List<Integer> roadVertices = new ArrayList<>();
+            List<Float> segmentDistances = new ArrayList<>();
+
+            // Collect vertices along this road
+            for (int i = 0; i < road.nodeIds.size(); i++) {
+                long nodeId = road.nodeIds.get(i);
                 Integer vertex = nodeToVertex.get(nodeId);
+
+                // Add vertex if it exists (intersection or endpoint)
                 if (vertex != null) {
-                    wayVertices.add(vertex);
+                    // Calculate distance from last vertex
+                    if (!roadVertices.isEmpty() && i > 0) {
+                        float distance = calculateSegmentDistance(road,
+                                roadVertices.size() > 0 ? findNodeIndex(road, roadVertices.get(roadVertices.size()-1)) : 0,
+                                i);
+                        segmentDistances.add(distance);
+                    }
+                    roadVertices.add(vertex);
                 }
             }
 
-            if (!wayVertices.isEmpty()) {
-                roadsWithVertices++;
+            // Debug vertex collection
+            if (roadsProcessed <= 5) {
+                System.out.println("  Found " + roadVertices.size() + " vertices on this road");
             }
-
-            if (wayVertices.size() < 2) {
-                roadsSkipped++;
-                continue;
-            }
-
-            // Get base weight multiplier for road type
-            float baseWeightMultiplier = getWeightMultiplier(road.roadType);
 
             // Create edges between consecutive vertices
-            for (int i = 0; i < wayVertices.size() - 1; i++) {
-                int from = wayVertices.get(i);
-                int to = wayVertices.get(i + 1);
+            for (int i = 0; i < roadVertices.size() - 1; i++) {
+                int fromVertex = roadVertices.get(i);
+                int toVertex = roadVertices.get(i + 1);
 
-                if (from < 0 || from >= graph.V() || to < 0 || to >= graph.V()) {
-                    System.err.println("ERROR: Invalid vertex indices: " +
-                            from + " -> " + to + " (graph size: " + graph.V() + ")");
-                    edgeCreationFailures++;
-                    continue;
-                }
-
-                if (from == to) {
+                if (fromVertex == toVertex) {
                     continue; // Skip self-loops
                 }
 
-                // CRITICAL: Calculate actual distance between vertices
-                float[] fromCoords = vertexCoords.get(from);
-                float[] toCoords = vertexCoords.get(to);
+                // Calculate weight (distance or time-based)
+                float distance = (i < segmentDistances.size()) ? segmentDistances.get(i) :
+                        calculateDirectDistance(fromVertex, toVertex);
 
-                if (fromCoords == null || toCoords == null) {
-                    System.err.println("WARNING: Missing coordinates for edge " + from + " -> " + to);
-                    continue;
+                if (distance <= 0) {
+                    System.err.println("WARNING: Zero or negative distance between vertices " +
+                            fromVertex + " and " + toVertex);
+                    distance = 0.001f; // Minimum distance
                 }
 
-                // Calculate distance in kilometers
-                float distance = calculateDistance(fromCoords[0], fromCoords[1],
-                        toCoords[0], toCoords[1]);
+                float weight = distance * getWeightMultiplier(road.roadType);
 
-                // Calculate travel time or cost
-                // Weight = distance * road_type_multiplier
-                // This gives us a weight that represents "cost" of traversing this edge
-                float weight = distance * baseWeightMultiplier;
-
-                // For time-based routing, you could use:
-                // float speedKmh = getSpeedForRoadType(road.roadType);
-                // float timeHours = distance / speedKmh;
-                // float weight = timeHours * 60; // Weight in minutes
-
+                // Create edge(s)
                 try {
-                    graph.addEdge(new DirectedEdge(from, to, weight));
+                    DirectedEdge edge = new DirectedEdge(fromVertex, toVertex, weight);
+                    graph.addEdge(edge);
                     edgeCount++;
 
-                    // Store properties for this edge
-                    edgeProperties.put(createEdgeKey(from, to), road.properties);
-
-                    if (!road.isOneWay) {
-                        graph.addEdge(new DirectedEdge(to, from, weight));
-                        edgeCount++;
-                        edgeProperties.put(createEdgeKey(to, from), road.properties);
+                    // Store properties
+                    String edgeKey = createEdgeKey(fromVertex, toVertex);
+                    if (road.properties != null) {
+                        edgeProperties.put(edgeKey, road.properties);
                     }
+
+                    // Add reverse edge if not one-way
+                    if (!road.isOneWay) {
+                        DirectedEdge reverseEdge = new DirectedEdge(toVertex, fromVertex, weight);
+                        graph.addEdge(reverseEdge);
+                        edgeCount++;
+
+                        String reverseKey = createEdgeKey(toVertex, fromVertex);
+                        if (road.properties != null) {
+                            edgeProperties.put(reverseKey, road.properties);
+                        }
+                    }
+
+                    // Debug first few edges
+                    if (edgeCount <= 10) {
+                        System.out.println("Created edge: " + fromVertex + " -> " + toVertex +
+                                " (weight: " + weight + ", distance: " + distance + "km)");
+                    }
+
                 } catch (Exception e) {
-                    System.err.println("ERROR adding edge: " + e.getMessage());
-                    edgeCreationFailures++;
+                    System.err.println("ERROR creating edge: " + e.getMessage());
                 }
             }
         }
 
         long edgeEnd = System.currentTimeMillis();
         System.out.println("\n=== EDGE BUILDING SUMMARY ===");
-        System.out.println("Edges created: " + edgeCount);
+        System.out.println("Processed " + roadsProcessed + " roads");
+        System.out.println("Created " + edgeCount + " edges");
         System.out.println("Time taken: " + (edgeEnd - edgeStart) + "ms");
+
+        if (edgeCount == 0) {
+            System.err.println("ERROR: No edges were created!");
+            debugWhyNoEdges();
+        }
+    }
+
+    /**
+     * Find node index in road
+     */
+    private int findNodeIndex(RoadData road, int vertex) {
+        Long nodeId = vertexToNodeId.get(vertex);
+        if (nodeId == null) return -1;
+
+        for (int i = 0; i < road.nodeIds.size(); i++) {
+            if (road.nodeIds.get(i).equals(nodeId)) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private float calculateSegmentDistance(RoadData road, int startNodeIndex, int endNodeIndex) {
+        if (road.way == null) {
+            return calculateNodeDistance(road.nodeIds.get(startNodeIndex),
+                    road.nodeIds.get(endNodeIndex));
+        }
+
+        float totalDistance = 0;
+        float[] coords = road.way.getCoords();
+
+        // Sum distances between consecutive nodes
+        for (int i = startNodeIndex; i < endNodeIndex && i < road.nodeIds.size() - 1; i++) {
+            if (i * 2 + 3 < coords.length) {
+                float x1 = coords[i * 2];
+                float y1 = coords[i * 2 + 1];
+                float x2 = coords[(i + 1) * 2];
+                float y2 = coords[(i + 1) * 2 + 1];
+
+                totalDistance += calculateDistance(x1, y1, x2, y2);
+            }
+        }
+
+        return totalDistance;
     }
 
     /**
@@ -495,30 +554,75 @@ public class GraphBuilder implements Serializable {
         return edgeProperties.get(createEdgeKey(from, to));
     }
     /**
-     * Calculate distance between two points using Haversine formula
-     * Returns distance in kilometers
+     * Calculate direct distance between two vertices
      */
-    private float calculateDistance(float x1, float y1, float x2, float y2) {
-        // First, convert back from internal coordinates to lat/lon
-        // Assuming x is lon*0.56 and y is -lat
-        float lon1 = x1 / 0.56f;
-        float lat1 = -y1;
-        float lon2 = x2 / 0.56f;
-        float lat2 = -y2;
+    private float calculateDirectDistance(int v1, int v2) {
+        float[] coords1 = vertexCoords.get(v1);
+        float[] coords2 = vertexCoords.get(v2);
 
-        // Haversine formula
-        float R = 6371.0f; // Earth's radius in kilometers
-        float dLat = FloatMath.toRadians(lat2 - lat1);
-        float dLon = FloatMath.toRadians(lon2 - lon1);
+        if (coords1 == null || coords2 == null) {
+            return 0.001f; // Minimum distance
+        }
 
-        float a = FloatMath.sin(dLat/2) * FloatMath.sin(dLat/2) +
-                FloatMath.cos(FloatMath.toRadians(lat1)) *
-                        FloatMath.cos(FloatMath.toRadians(lat2)) *
-                        FloatMath.sin(dLon/2) * FloatMath.sin(dLon/2);
+        return calculateDistance(coords1[0], coords1[1], coords2[0], coords2[1]);
+    }
 
-        float c = 2 * FloatMath.atan2(FloatMath.sqrt(a), FloatMath.sqrt(1-a));
+    private float calculateDistance(float v, float v1, float v2, float v3) {
+    }
 
-        return R * c;
+    /**
+     * Calculate distance between two nodes by ID
+     */
+    private float calculateNodeDistance(long nodeId1, long nodeId2) {
+        float[] coords1 = nodeCoordinateCache.get(nodeId1);
+        float[] coords2 = nodeCoordinateCache.get(nodeId2);
+
+        if (coords1 == null || coords2 == null) {
+            return 0.001f; // Minimum distance
+        }
+
+        return calculateDistance(coords1[0], coords1[1], coords2[0], coords2[1]);
+    }
+
+    private void debugWhyNoEdges() {
+        System.err.println("\n=== DEBUGGING WHY NO EDGES ===");
+
+        // Check road data
+        System.err.println("Total roads in roadDataList: " + roadDataList.size());
+        if (roadDataList.isEmpty()) {
+            System.err.println("ERROR: No roads were stored!");
+            return;
+        }
+
+        // Sample first few roads
+        int sampleCount = Math.min(5, roadDataList.size());
+        for (int i = 0; i < sampleCount; i++) {
+            RoadData road = roadDataList.get(i);
+            System.err.println("\nRoad " + i + ":");
+            System.err.println("  Type: " + road.roadType);
+            System.err.println("  Nodes: " + (road.nodeIds != null ? road.nodeIds.size() : "null"));
+
+            if (road.nodeIds != null && road.nodeIds.size() >= 2) {
+                // Check how many vertices this road has
+                int vertexCount = 0;
+                for (Long nodeId : road.nodeIds) {
+                    if (nodeToVertex.containsKey(nodeId)) {
+                        vertexCount++;
+                    }
+                }
+                System.err.println("  Vertices on road: " + vertexCount);
+
+                if (vertexCount < 2) {
+                    System.err.println("  ERROR: Road has less than 2 vertices!");
+                }
+            }
+        }
+
+        // Check vertex mapping
+        System.err.println("\nVertex mapping statistics:");
+        System.err.println("  Total vertices: " + vertexCount);
+        System.err.println("  nodeToVertex entries: " + nodeToVertex.size());
+        System.err.println("  vertexCoords entries: " + vertexCoords.size());
     }
     /**
      * Get weight multiplier for different road types

@@ -29,7 +29,7 @@ import java.io.IOException;
 public class HelloApplication extends Application {
     @Override
     public void start(Stage stage) throws IOException, XMLStreamException, ClassNotFoundException {
-        String filename = "C:\\Users\\Joach\\Documents\\BFST2025Group27\\osmparsing\\data\\denmark-latest.osm.obj";
+        String filename = "C:\\Users\\Joach\\Documents\\BFST2025Group27\\osmparsing\\data\\bornholm.osm";
         var model = Model.load(filename);
         System.out.println("ADRESSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSSS");
         System.out.println("adresshandler size " + model.addressHandlerSize());
